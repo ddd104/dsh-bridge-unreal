@@ -1,0 +1,192 @@
+# DSH Unreal Bridge
+
+DeepSeek Harness（DSH）的 Unreal Editor 桥接插件。每个对话可以独立绑定本机 UE 编辑器，显示资产、Actor、组件选区，并使用蓝图、材质、MCP、项目知识、运行快照和图像分析工具。
+
+本仓库只发行 **DSH 端插件**，版本为 **0.6.2**，基于原仓库 0.6.1 拆分。适配 DSH **0.2.1-rc.2**。UE 工程侧仍需单独安装和编译 [DSHUnrealBridge UE 插件](https://github.com/ddd104/dsh-unreal-bridge/tree/main/unreal/DSHUnrealBridge)。
+
+## 使用流程一览
+
+**安装 DSH 端 → 准备 UE 工程端 → 打开两端并绑定对话 → 选择对象 → 提出任务 → 检查结果并保存。**
+
+已经安装 UE 端插件的用户，只需安装本仓库的 DSH 端，然后重新选择编辑器。
+
+| 准备项 | 要求 |
+| --- | --- |
+| DSH | 已安装并启动过的 DSH Desktop，当前适配版本为 0.2.1-rc.2 |
+| 系统与工程 | 当前使用流程面向 Windows、本机 UE 工程；DSH 与 UE 使用同一 Windows 用户运行 |
+| UE 插件 | 工程的 `Plugins/DSHUnrealBridge` 已准备、编译并启用 |
+| 引擎版本 | UE 端沿用原仓库面向 UE 5.8.2 的实现；其他引擎版本需自行适配，不能直接视为兼容 |
+| 网络 | DSH 安装插件时需要下载依赖；GitHub 安装还需要能够访问仓库或 DSH 提供的镜像 |
+
+仅安装 DSH 端不需要系统 Node.js。只有开发本插件或从源码准备 UE 端知识工具时，才需要 Node.js 22+ 和 npm。
+
+## 第一步：在 DSH 页面安装
+
+### 从 GitHub 安装
+
+此方式在本仓库代码推送到 GitHub 后可用。若当前只有本地副本，使用下方“从本地目录安装”。
+
+打开 **插件 → 添加插件**，在“包名、GitHub 仓库地址或本地目录路径”输入框中粘贴：
+
+```text
+https://github.com/ddd104/dsh-bridge-unreal
+```
+
+点击 **安装**，完成后启用插件；若输入框上方没有出现 Unreal Editor 面板，完整退出 DSH（包括托盘）后重新打开。
+
+同一输入框也支持明确的 GitHub 包地址：
+
+```text
+github:ddd104/dsh-bridge-unreal
+```
+
+### 从本地目录安装
+
+在同一“添加插件”输入框中，输入包含 `package.json` 的仓库根目录绝对路径。例如本机：
+
+```text
+D:\AI\dsh-bridge-unreal
+```
+
+点击安装，完成后启用插件。路径应指向本仓库根目录，不是 `src`、`lib` 或 UE 工程的插件目录。
+
+也可以输入已生成的 `.tgz` 安装包的绝对路径。安装包生成和独立交付方法见[发行说明](docs/dsh-release.md)。
+
+仓库根目录已经包含插件声明、`cordis.patch.yml` 和编译好的 `lib/index.js`、`lib/client.js`、`lib/remote.js`。安装用户无需运行 npm、编译源代码或执行批处理；下载依赖仍需要网络。仓库地址安装使用远端提交，因此本地修改必须先推送到 GitHub 才能被其他机器下载。
+
+“中国大陆镜像源”控制依赖下载与 DSH 提供的 GitHub 镜像流程；GitHub 下载失败时按 DSH 的连接提示选择镜像或切换网络。插件本身不设置系统代理或改写镜像地址。
+
+仓库名是 `dsh-bridge-unreal`，**插件包名和运行时标识仍为 `dsh-unreal-bridge`**，以便沿用旧版设置及通信标识。这不是 npm 包名变更，也不要求同时启用两份插件。若旧版本来自本地安装包，按 DSH 界面提示先卸载旧包，再安装本仓库；升级前可备份 DSH 配置。
+
+## 第二步：准备 UE 工程端
+
+本仓库的 DSH 插件安装不会自动复制 UE 插件或编译 DLL。UE 端源码和构建说明位于[原仓库](https://github.com/ddd104/dsh-unreal-bridge)。如果工程已经安装了兼容的 UE 端，可跳到下一步。
+
+首次从源码准备时：
+
+1. 获取原仓库 `ddd104/dsh-unreal-bridge`，关闭需要安装或升级插件的 UE 工程。
+2. 在**原仓库根目录**运行以下命令，准备 UE 端使用的固定版本 Node 运行时及知识工具。这条命令不在本仓库中。
+
+   ```powershell
+   powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\prepare-knowledge.ps1
+   ```
+
+3. 将准备好的 `unreal/DSHUnrealBridge` 整个目录复制到目标工程的 `Plugins/DSHUnrealBridge`。应包含 `DSHUnrealBridge.uplugin`、`Source`、`Config`、`Skills`、`Tools` 和生成的 `Runtime`。升级已有工程时，先备份旧插件，并保留自己修改过的 `Config/Knowledge/ProjectMemory.project.json`。
+4. 使用该工程对应的 Unreal Engine 和 C++ 构建环境编译 Editor 目标，再打开工程。源码仓库不提供通用预编译 DLL；如果提示模块缺失，需要先完成编译。
+5. 在 UE 的插件设置中确认 **DSH Unreal Bridge** 已启用。插件声明依赖 `ModelContextProtocol` 与 `ToolsetRegistry`；需要通用 UE MCP 操作时，工程还应启用所需工具集，例如原仓库使用的 `AllToolsets`。按 UE 提示重启编辑器。
+
+原仓库的 `install-dsh.bat` 同时处理旧版 DSH 安装流程；已通过本仓库安装 DSH 端时，可按上面的步骤单独准备 UE 端。
+
+## 第三步：绑定编辑器并确认选区
+
+1. 打开 DSH 和已准备好的 UE 工程。
+2. 在 DSH 中打开一个对话，找到聊天输入框上方的 **Unreal Editor** 面板；如果面板收起，点击展开按钮。
+3. 在面板中选择目标编辑器，核对显示的工程和连接状态。每个对话独立绑定，切换对话后需检查绑定对象。
+4. 在 UE 的 Content Browser 中选一个蓝图，或在关卡中选一个 Actor/组件，确认 DSH 面板显示同一个对象。支持多选；执行针对单个对象的任务时，先选清楚目标。
+5. 发送下面的只读请求，完成首次连通检查：
+
+   ```text
+   读取当前绑定的 Unreal Editor 状态，告诉我工程、当前选中对象和可用工具能力，不修改任何资产。
+   ```
+
+默认连接仅监听本机 `127.0.0.1:17891`。Windows 下 UE 从 `%LOCALAPPDATA%\DSHUnrealBridge\bridge.json` 发现 DSH 端连接信息；正常使用不需要手动填写或复制令牌。
+
+选区变化只更新面板与本地缓存，不会自动向模型发送任务。多开工程时以当前对话的绑定为准，先核对对象再提出修改请求。
+
+## 第四步：在对话中操作 UE
+
+可以直接使用自然语言。以下示例中的“当前选中”指面板已经显示的对象。
+
+### 读取与解释
+
+```text
+读取当前选中的蓝图，说明 BeginPlay 的执行逻辑和它引用的主要资产，不做修改。
+```
+
+### 修改蓝图或材质
+
+```text
+在当前选中蓝图的 BeginPlay 后增加 PrintString，打印 Hello。先读取当前图并预览修改，等我确认再应用，不要保存。
+```
+
+预览后确认目标与修改范围，再明确要求应用。检查 UE 中的编译结果和实际图内容，最后单独要求保存。原生蓝图、材质补丁不会自动保存资产；其他 MCP 工具是否包含保存行为，以该工具的说明为准。
+
+### 分析运行状态
+
+在 UE 中开始 PIE 或模拟，选中运行中的 Actor/组件，然后发送：
+
+```text
+读取当前运行实例的状态，检查组件可见性和变换，结合相关蓝图分析异常原因，不修改。
+```
+
+运行快照按请求采集，不是连续录像或执行轨迹。结束 PIE 后旧实例身份失效；重新运行需要重新选择对象。
+
+### 对比参考图
+
+上传参考图，在 UE 关卡中选择目标 Actor/组件，然后发送：
+
+```text
+将这张参考图与当前选中物体的编辑器画面对比，用中文说明色彩、形状和材质上的差异，不修改场景。
+```
+
+当前画面捕获支持编辑器关卡视口，不支持 PIE 游戏窗口截图。不同视角或构图的参考图用于辅助分析，不等同于像素验收。详见[局部画面对比](docs/visual-comparison.md)。
+
+### 查询项目资料与技能
+
+将 DSH 会话工作区设置为 UE 工程目录或其子目录。插件会向上寻找 `.uproject`，接入该工程 `Plugins/DSHUnrealBridge/Skills` 中的技能；项目知识查询需要 UE 端知识工具已经准备完成。可以请求“查询项目资料中角色移动系统的设计，并结合当前蓝图说明实现”。
+
+完整工具行为与参数见[工具与通信协议](docs/protocol.md)。
+
+## 设置、升级与卸载
+
+在 **DSH 设置 → Unreal Bridge** 或插件行的配置入口调整执行权限、修复次数、任务预算、超时与缓存保留。
+
+- 初次安装的 bundle 配置允许写入，原生写入批准选项为关闭。只读体验可关闭“允许修改 UE 资产和项目知识”；需要原生写入确认时开启“原生写入前请求批准”，其适用范围见设置说明。
+- 权限与超时从下一次请求生效；预算和修复限制从下一轮用户任务生效。保存缓存设置本身不会删除文件。
+- 升级 DSH 端时，按 DSH 插件页支持的更新或卸载重装流程操作，完成后重新打开 DSH。本地源码修改需重新构建并重新安装；GitHub 安装读取远端已推送的版本。
+- 新功能如果报告 UE 能力不足，需要另外更新并重新编译 UE 插件，然后重启工程。
+- 停用或卸载 DSH 端在插件页操作。该操作不会移除工程中的 UE 插件或项目资料。
+
+## 常见问题
+
+| 现象 | 排查顺序 |
+| --- | --- |
+| GitHub 地址安装失败 | 确认代码已推送且仓库可访问；按 DSH 提示选择镜像或检查网络。本地尚未发布时改用绝对目录路径安装 |
+| 安装成功但没有面板 | 确认插件已启用、DSH 为适配版本；完整退出 DSH（包括托盘）后重开，并打开一个对话 |
+| 面板没有在线 UE | 确认 UE 插件编译并加载成功、两端运行于同一用户、没有另一份桥接进程占用端口；查看 DSH 和 UE 的错误日志 |
+| 有编辑器但选区不对 | 检查当前对话绑定的工程；在 UE 中重新选择目标，再核对面板中的对象路径 |
+| 提示 MCP 或某项能力不可用 | 核对 UE 端版本、`ModelContextProtocol` 及所需工具集；更新并编译 UE 插件后重启 |
+| 技能或项目知识不可用 | 核对会话工作区能否向上找到 `.uproject`，以及 UE 插件的 `Skills`、准备好的 `Runtime` 和知识工具是否完整 |
+| 写入超时或结果未知 | 先让 DSH 查询原请求状态并读取实际结果，避免直接重复相同修改 |
+
+安装与自动化测试范围见[迁移验证](docs/validation.md)。其中本地安装通过不代表已发布 GitHub，也不代替具体 UE 工程中的效果验收。
+
+## 开发与发布
+
+开发需要 Node.js 22+：
+
+```powershell
+npm ci
+npm run check
+```
+
+`check` 生成发行构建、运行测试并检查安装包。修改源码后必须把更新的三个 `lib/*.js` 与源码一起提交；CI 会拒绝源码与已提交构建不一致的修改。根包没有 `prepare` / `postinstall` 等安装构建脚本，兼容 DSH 禁用安装脚本的流程。带 sourcemap 的本地构建使用 `npm run build:dev`，输出到忽略的 `.test-state/lib`。
+
+仅开发跨仓库协议时，指定 UE 插件目录后运行完整测试：
+
+```powershell
+$env:DSH_UE_PLUGIN_ROOT = 'D:\AI\dsh-unreal-bridge\unreal\DSHUnrealBridge'
+npm test
+```
+
+未指定时仅跳过两项需要 UE 源码的对照测试，其余 DSH 测试照常运行。测试运行器使用 `.test-state/tmp` 的完整路径，避免 Windows 短路径别名触发缓存保护；没有文件符号链接权限的 Windows 环境会明确跳过一项文件链接测试，目录链接保护仍会测试。
+
+生成可单独交付的安装包：
+
+```powershell
+npm run package:dsh
+```
+
+输出在 `dist/dsh/`，包含 `.tgz` 及 Windows 安装辅助脚本。详见 [发行说明](docs/dsh-release.md)和[迁移范围](docs/migration.md)。
+
+DSH bundle 格式及 GitHub 安装方式依据 [官方插件打包文档](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/user/develop/basic/publish.md)。
