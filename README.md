@@ -45,7 +45,7 @@ github:ddd104/dsh-bridge-unreal
 在同一“添加插件”输入框中，输入包含 `package.json` 的仓库根目录绝对路径。例如本机：
 
 ```text
-D:\AI\dsh-bridge-unreal
+./dsh-bridge-unreal/dist/dsh/install-dsh.bat
 ```
 
 点击安装，完成后启用插件。路径应指向本仓库根目录，不是 `src`、`lib` 或 UE 工程的插件目录。
@@ -159,34 +159,3 @@ D:\AI\dsh-bridge-unreal
 | 技能或项目知识不可用 | 核对会话工作区能否向上找到 `.uproject`，以及 UE 插件的 `Skills`、准备好的 `Runtime` 和知识工具是否完整 |
 | 写入超时或结果未知 | 先让 DSH 查询原请求状态并读取实际结果，避免直接重复相同修改 |
 
-安装与自动化测试范围见[迁移验证](docs/validation.md)。其中本地安装通过不代表已发布 GitHub，也不代替具体 UE 工程中的效果验收。
-
-## 开发与发布
-
-开发需要 Node.js 22+：
-
-```powershell
-npm ci
-npm run check
-```
-
-`check` 生成发行构建、运行测试并检查安装包。修改源码后必须把更新的三个 `lib/*.js` 与源码一起提交；CI 会拒绝源码与已提交构建不一致的修改。根包没有 `prepare` / `postinstall` 等安装构建脚本，兼容 DSH 禁用安装脚本的流程。带 sourcemap 的本地构建使用 `npm run build:dev`，输出到忽略的 `.test-state/lib`。
-
-仅开发跨仓库协议时，指定 UE 插件目录后运行完整测试：
-
-```powershell
-$env:DSH_UE_PLUGIN_ROOT = 'D:\AI\dsh-unreal-bridge\unreal\DSHUnrealBridge'
-npm test
-```
-
-未指定时仅跳过两项需要 UE 源码的对照测试，其余 DSH 测试照常运行。测试运行器使用 `.test-state/tmp` 的完整路径，避免 Windows 短路径别名触发缓存保护；没有文件符号链接权限的 Windows 环境会明确跳过一项文件链接测试，目录链接保护仍会测试。
-
-生成可单独交付的安装包：
-
-```powershell
-npm run package:dsh
-```
-
-输出在 `dist/dsh/`，包含 `.tgz` 及 Windows 安装辅助脚本。详见 [发行说明](docs/dsh-release.md)和[迁移范围](docs/migration.md)。
-
-DSH bundle 格式及 GitHub 安装方式依据 [官方插件打包文档](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/user/develop/basic/publish.md)。
