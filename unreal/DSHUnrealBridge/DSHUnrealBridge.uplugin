@@ -1,0 +1,16 @@
+{
+  "FileVersion": 3,
+  "Version": 11,
+  "VersionName": "0.5.1",
+  "FriendlyName": "DSH Unreal Bridge",
+  "Description": "Authenticated DSH bridge with level Blueprint lookup, PIE inspection, UE MCP tools, project knowledge and viewport comparison.",
+  "Category": "Editor",
+  "CanContainContent": false,
+  "EnabledByDefault": true,
+  "Modules": [
+    {"Name":"DSHUnrealBridgeMCP","Type":"Editor","LoadingPhase":"PostEngineInit"},
+    {"Name":"DSHUnrealBridgeKnowledge","Type":"EditorNoCommandlet","LoadingPhase":"PostEngineInit","PlatformAllowList":["Win64"]},
+    {"Name":"DSHUnrealBridge","Type":"Editor","LoadingPhase":"PostEngineInit"}
+  ],
+  "Plugins": [{"Name":"ModelContextProtocol","Enabled":true},{"Name":"ToolsetRegistry","Enabled":true}]
+}

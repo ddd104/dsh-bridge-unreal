@@ -2,11 +2,13 @@
 
 DeepSeek Harness（DSH）的 Unreal Editor 桥接插件。每个对话可以独立绑定本机 UE 编辑器，显示资产、Actor、组件选区，并使用蓝图、材质、MCP、项目知识、运行快照和图像分析工具。
 
-本仓库只发行 **DSH 端插件**，版本为 **0.6.2**，基于原仓库 0.6.1 拆分。适配 DSH **0.2.1-rc.2**。UE 工程侧仍需单独安装和编译 [DSHUnrealBridge UE 插件](https://github.com/ddd104/dsh-unreal-bridge/tree/main/unreal/DSHUnrealBridge)。
+本仓库提供 **DSH 端插件**安装入口，版本为 **0.6.2**，基于原仓库 0.6.1 拆分，适配 DSH **0.2.1-rc.2**。UE 工程侧需要另外将 [DSHUnrealBridge 插件](unreal/DSHUnrealBridge)导入项目、编译并启用。
+
+**仅支持 Unreal Engine 5.8（UE 5.8.x），不支持其他 UE 版本。** 请使用 UE 5.8 创建或打开目标项目，并使用同一引擎版本编译插件。
 
 ## 使用流程一览
 
-**安装 DSH 端 → 准备 UE 工程端 → 打开两端并绑定对话 → 选择对象 → 提出任务 → 检查结果并保存。**
+**安装 DSH 端 → 将 DSHUnrealBridge 导入 UE 5.8 项目 → 编译并启用插件 → 打开两端并绑定对话 → 选择对象 → 提出任务 → 检查结果并保存。**
 
 已经安装 UE 端插件的用户，只需安装本仓库的 DSH 端，然后重新选择编辑器。
 
@@ -14,8 +16,8 @@ DeepSeek Harness（DSH）的 Unreal Editor 桥接插件。每个对话可以独�
 | --- | --- |
 | DSH | 已安装并启动过的 DSH Desktop，当前适配版本为 0.2.1-rc.2 |
 | 系统与工程 | 当前使用流程面向 Windows、本机 UE 工程；DSH 与 UE 使用同一 Windows 用户运行 |
-| UE 插件 | 工程的 `Plugins/DSHUnrealBridge` 已准备、编译并启用 |
-| 引擎版本 | UE 端沿用原仓库面向 UE 5.8.2 的实现；其他引擎版本需自行适配，不能直接视为兼容 |
+| UE 插件 | 将 `DSHUnrealBridge` 整个目录导入工程的 `Plugins/DSHUnrealBridge`，编译并启用 |
+| 引擎版本 | **仅支持 UE 5.8（5.8.x），其他版本不受支持** |
 | 网络 | DSH 安装插件时需要下载依赖；GitHub 安装还需要能够访问仓库或 DSH 提供的镜像 |
 
 仅安装 DSH 端不需要系统 Node.js。只有开发本插件或从源码准备 UE 端知识工具时，才需要 Node.js 22+ 和 npm。
@@ -58,22 +60,47 @@ github:ddd104/dsh-bridge-unreal
 
 仓库名是 `dsh-bridge-unreal`，**插件包名和运行时标识仍为 `dsh-unreal-bridge`**，以便沿用旧版设置及通信标识。这不是 npm 包名变更，也不要求同时启用两份插件。若旧版本来自本地安装包，按 DSH 界面提示先卸载旧包，再安装本仓库；升级前可备份 DSH 配置。
 
-## 第二步：准备 UE 工程端
+## 第二步：将 DSHUnrealBridge 导入 UE 5.8 项目
 
-本仓库的 DSH 插件安装不会自动复制 UE 插件或编译 DLL。UE 端源码和构建说明位于[原仓库](https://github.com/ddd104/dsh-unreal-bridge)。如果工程已经安装了兼容的 UE 端，可跳到下一步。
+在 DSH 中安装插件不会自动将 UE 插件装入项目，也不会自动编译 DLL。请手动导入本仓库的 `unreal/DSHUnrealBridge`；UE 端源码和构建说明也可在[原仓库](https://github.com/ddd104/dsh-unreal-bridge)查看。已经完成导入、编译和启用的 UE 5.8 项目可跳到下一步。
 
-首次从源码准备时：
+### 导入、编译与启用
 
-1. 获取原仓库 `ddd104/dsh-unreal-bridge`，关闭需要安装或升级插件的 UE 工程。
-2. 在**原仓库根目录**运行以下命令，准备 UE 端使用的固定版本 Node 运行时及知识工具。这条命令不在本仓库中。
+1. 确认目标项目使用 **UE 5.8**，然后关闭该项目的 Unreal Editor。
+2. 在 `.uproject` 文件所在的项目根目录创建 `Plugins` 文件夹；已存在时直接使用。
+3. 将本仓库 `unreal/DSHUnrealBridge` **整个文件夹**复制到项目的 `Plugins` 下，确保插件描述文件位于 `Plugins/DSHUnrealBridge/DSHUnrealBridge.uplugin`。不要只复制 `.uplugin` 文件，也不要将插件放进 `Content` 或通过内容浏览器导入。
+4. 使用 **UE 5.8** 和对应的 C++ 构建环境编译项目的 Editor 目标，再打开项目。如果提示模块缺失或需要重新编译，先完成编译；不能使用其他 UE 版本的插件 DLL。
+5. 在 UE 的 **编辑 → 插件（Edit → Plugins）** 中搜索并启用 **DSH Unreal Bridge**。插件声明依赖 `ModelContextProtocol` 与 `ToolsetRegistry`；需要通用 UE MCP 操作时，工程还应启用所需工具集，例如原仓库使用的 `AllToolsets`。按 UE 提示重启编辑器。
+
+导入后的目录结构应为：
+
+```text
+MyProject/
+├─ MyProject.uproject
+└─ Plugins/
+   └─ DSHUnrealBridge/
+      ├─ DSHUnrealBridge.uplugin
+      ├─ Source/
+      ├─ Config/
+      ├─ Skills/
+      ├─ ThirdParty/
+      └─ Tools/
+```
+
+升级已有插件时，先备份原来的 `Plugins/DSHUnrealBridge`，并保留自己修改过的 `Config/Knowledge/ProjectMemory.project.json`。
+
+### 准备项目知识工具
+
+项目知识功能还需要固定版本的 Node 运行时和已构建的知识工具。如果导入的插件尚未包含准备好的 `Runtime` 和工具构建产物：
+
+1. 获取原仓库 `ddd104/dsh-unreal-bridge`。
+2. 在**原仓库根目录**运行以下命令。该准备脚本不在本仓库中。
 
    ```powershell
    powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\prepare-knowledge.ps1
    ```
 
-3. 将准备好的 `unreal/DSHUnrealBridge` 整个目录复制到目标工程的 `Plugins/DSHUnrealBridge`。应包含 `DSHUnrealBridge.uplugin`、`Source`、`Config`、`Skills`、`Tools` 和生成的 `Runtime`。升级已有工程时，先备份旧插件，并保留自己修改过的 `Config/Knowledge/ProjectMemory.project.json`。
-4. 使用该工程对应的 Unreal Engine 和 C++ 构建环境编译 Editor 目标，再打开工程。源码仓库不提供通用预编译 DLL；如果提示模块缺失，需要先完成编译。
-5. 在 UE 的插件设置中确认 **DSH Unreal Bridge** 已启用。插件声明依赖 `ModelContextProtocol` 与 `ToolsetRegistry`；需要通用 UE MCP 操作时，工程还应启用所需工具集，例如原仓库使用的 `AllToolsets`。按 UE 提示重启编辑器。
+3. 将准备好的插件中的 `Runtime`、`Tools` 目录复制到目标项目的 `Plugins/DSHUnrealBridge` 下，保持与该 UE 插件源码版本配套，然后重新打开项目。
 
 原仓库的 `install-dsh.bat` 同时处理旧版 DSH 安装流程；已通过本仓库安装 DSH 端时，可按上面的步骤单独准备 UE 端。
 
@@ -155,6 +182,7 @@ github:ddd104/dsh-bridge-unreal
 | 安装成功但没有面板 | 确认插件已启用、DSH 为适配版本；完整退出 DSH（包括托盘）后重开，并打开一个对话 |
 | 面板没有在线 UE | 确认 UE 插件编译并加载成功、两端运行于同一用户、没有另一份桥接进程占用端口；查看 DSH 和 UE 的错误日志 |
 | 有编辑器但选区不对 | 检查当前对话绑定的工程；在 UE 中重新选择目标，再核对面板中的对象路径 |
+| UE 提示引擎版本不兼容 | 本插件仅支持 UE 5.8；请使用 UE 5.8 项目及该版本编译的插件，不支持其他引擎版本 |
 | 提示 MCP 或某项能力不可用 | 核对 UE 端版本、`ModelContextProtocol` 及所需工具集；更新并编译 UE 插件后重启 |
 | 技能或项目知识不可用 | 核对会话工作区能否向上找到 `.uproject`，以及 UE 插件的 `Skills`、准备好的 `Runtime` 和知识工具是否完整 |
 | 写入超时或结果未知 | 先让 DSH 查询原请求状态并读取实际结果，避免直接重复相同修改 |
