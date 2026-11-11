@@ -23,7 +23,7 @@ test('blocks the actual DataTable JSON writers, their singular aliases and quali
     denied({ name: `${dataTable}.${tool}`, arguments: {} }, 'lossy_json_roundtrip');
   }
   try { assertSafeMcpCall(callTool(dataTable, 'set_rows')); }
-  catch (error) { assert.equal(error.details.recommendedTool, 'data_table_copy_property'); }
+  catch (error) { assert.equal(error.details.recommendedTool, 'unreal_data_table_patch'); }
 });
 
 test('recognizes case, punctuation and camelCase variants of qualified identifiers', () => {

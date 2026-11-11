@@ -37,7 +37,7 @@ function checkTarget(name, args, allowDesktopInput) {
   // remove_rows is a native row removal; create/import_file do not take this
   // lossy path, so these methods remain available.
   if (DATA_TABLE.test(name) && LOSSY_DATA_TABLE_METHODS.some(pattern => pattern.test(name))) {
-    blocked('lossy_json_roundtrip', 'This DataTable tool can lose unrelated data. Do not retry; use native data_table_copy_property.', 'data_table_copy_property');
+    blocked('lossy_json_roundtrip', 'This DataTable tool can lose unrelated data. Do not retry. Use unreal_data_table_patch for row/nested field edits or unreal_data_table_copy_property for whole-column copies. If the required capability is missing, stop this operation and report the plugin update requirement; do not rebuild the bridge as part of an asset edit.', 'unreal_data_table_patch');
   }
   if (!SLATE.test(name) || allowDesktopInput) return;
   if (method(['windows']).test(name)) {

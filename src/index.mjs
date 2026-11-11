@@ -1,6 +1,6 @@
 import {z} from 'zod';
 import {UnrealBridge} from './bridge.mjs';
-import {id,assetPath,patchSchema,createSchema,readSchema,focusSchema,catalogSchema,knowledgeSchema,knowledgeRecordSchema,mcpDescribeSchema,mcpCallSchema,mcpToolsetCallSchema,dataTableCopySchema,runtimeSnapshotSchema,runtimeHistorySchema,jsonSchema,fail,errorResult} from './protocol.mjs';
+import {id,assetPath,patchSchema,createSchema,readSchema,focusSchema,catalogSchema,knowledgeSchema,knowledgeRecordSchema,mcpDescribeSchema,mcpCallSchema,mcpToolsetCallSchema,dataTableCopySchema,dataTablePatchSchema,runtimeSnapshotSchema,runtimeHistorySchema,jsonSchema,fail,errorResult} from './protocol.mjs';
 import {TYPERT} from './remote.mjs';
 import {writeFile} from 'node:fs/promises';
 import {VisualService} from './visual.mjs';
@@ -160,6 +160,10 @@ export async function apply(ctx,raw={}) {
   tool('unreal_mcp_call','Call a discovered UE 5.8 MCP tool directly in the bound editor without an approval prompt. Supply the exact name, arguments and requestId.',mcpCallSchema,async(a,e,s,admit)=>bridge.mcpCall(s,a,e.signal,admit),true);
   tool('unreal_mcp_call_toolset','Call a discovered UE 5.8 toolset function directly in the bound editor without an approval prompt. Supply the full toolsetName, function short name in toolName, and arguments matching its current discovered schema.',mcpToolsetCallSchema,async(a,e,s,admit)=>bridge.mcpCallToolset(s,a,e.signal,admit),true);
   tool('unreal_data_table_copy_property','Copy one reflected DataTable property from sourceRow to targetRows (omit for all other rows). Atomic native deep copy, verified rollback, no JSON round trip, no save or desktop input.',dataTableCopySchema,async(a,e,s)=>{await approve(e,`复制 DataTable 字段：${a.assetPath}\n${a.sourceRow} → ${a.targetRows?.join(', ')??'其他所有行'}\n${a.propertyName}`);return bridge.copyDataTableProperty(s,a,e.signal);},true);
+  tool('unreal_data_table_patch','Preview/apply atomic DataTable row edits. Paths traverse existing struct fields, map keys (including enums) and array indices. set edits a scalar leaf; copy deep-copies a matching field from original sourcePath in the same row (or sourceRow). Omit rows for all rows. Example: copy path ["ColorTypeMaterialParams","Green"] from sourcePath ["ColorTypeMaterialParams","Blue"]. Defaults to dryRun=true; use a new requestId and dryRun=false to apply. Verifies every row and rolls back failures; never saves.',dataTablePatchSchema,async(a,e,s)=>{
+    if(!a.dryRun)await approve(e,`修改 DataTable 字段：${a.assetPath}\n${a.operations.length} 项操作；不保存`);
+    return bridge.patchDataTable(s,a,e.signal);
+  },true);
   tool('unreal_material_read','Read a material or material-function graph revision, node identities, editable properties and exact pins. Optionally inspect expression class metadata in the same request. Requires material_graph_patch; material instances use their discovered parameter tools.',materialReadSchema,async(a,e,s)=>bridge.materialRead(s,a,e.signal));
   tool('unreal_material_patch','Preview or apply one coherent material/function graph batch with node aliases, properties, connections and outputs. Defaults to dryRun=true on a transient copy; use the same baseRevision and operations with dryRun=false to commit. Verifies compilation and failure restoration; never saves. Whole-graph layout and cleanup candidates must be explicit.',materialPatchSchema,async(a,e,s)=>{
     if(!a.dryRun)await approve(e,`修改材质图：${a.assetPath}\n${a.operations.length} 项操作；不保存`);

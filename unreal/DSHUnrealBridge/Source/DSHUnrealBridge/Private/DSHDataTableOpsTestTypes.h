@@ -5,6 +5,9 @@
 #include "DSHDataTableOpsTestTypes.generated.h"
 
 // Native fixtures exercise containers that are corrupted by JSON round-tripping.
+UENUM()
+enum class EDSHDataTableTestColor : uint8 { Green, Blue, Red };
+
 USTRUCT()
 struct FDSHDataTableCopyTestColors
 {
@@ -21,6 +24,9 @@ USTRUCT()
 struct FDSHDataTableCopyTestRow : public FTableRowBase
 {
     GENERATED_BODY()
+
+    UPROPERTY()
+    TMap<EDSHDataTableTestColor, FDSHDataTableCopyTestColors> ColorTypeMaterialParams;
 
     UPROPERTY()
     TMap<FName, FDSHDataTableCopyTestColors> RenderTargetColors;

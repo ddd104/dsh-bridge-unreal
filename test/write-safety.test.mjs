@@ -31,6 +31,39 @@ async function editor(bridge,handler,capabilities=['mcp_tools','mcp_target_valid
 const copy=()=>({assetPath:'/Game/DT_Test',sourceRow:'Predestrian',propertyName:'ColorTypeMaterialParams',requestId:randomUUID()});
 const copied={verified:true,targetCount:45,changedRows:45,unchangedRows:0,saved:false};
 
+const patch=()=>({assetPath:'/Game/DT_Test',operations:[{op:'copy',path:['colorTypeMaterialParams','Green'],sourcePath:['ColorTypeMaterialParams','Blue']}],requestId:randomUUID()});
+test('DataTable patch previews without write permission and commits once with native verification',async t=>{
+  const bridge=await fixture(t,{allowWrites:false});
+  const calls=await editor(bridge,m=>({ok:true,result:{...copied,dryRun:m.params.dryRun}}),['data_table_patch']);
+  assert.equal((await bridge.patchDataTable('chat',patch())).dryRun,true);
+  const args={...patch(),dryRun:false};
+  await assert.rejects(bridge.patchDataTable('chat',args),{code:'READ_ONLY'});
+  bridge.config.allowWrites=true;
+  assert.equal((await bridge.patchDataTable('chat',args)).verified,true);
+  await bridge.patchDataTable('chat',args);
+  assert.equal(calls.length,2);
+  assert.equal(calls[1].method,'data_table_patch');
+  assert.deepEqual(calls[1].params.operations,args.operations);
+});
+test('DataTable patch capability and verification failures are explicit',async t=>{
+  const bridge=await fixture(t);
+  const calls=await editor(bridge,()=>({ok:true,result:{verified:false}}),['data_table_copy_property']);
+  await assert.rejects(bridge.patchDataTable('chat',patch()),{code:'DATA_TABLE_PATCH_UNAVAILABLE'});
+  assert.equal(calls.length,0);
+  bridge.target('chat').capabilities.push('data_table_patch');
+  await assert.rejects(bridge.patchDataTable('chat',patch()),{code:'DATA_TABLE_PREVIEW_INVALID'});
+  await assert.rejects(bridge.patchDataTable('chat',{...patch(),dryRun:false}),{code:'DATA_TABLE_ROLLBACK_FAILED'});
+  assert.equal(bridge.state('chat').writeLock.rollback,'failed');
+});
+test('UE FString JSON errors are failures and cannot bypass write locks',async t=>{
+  const bridge=await fixture(t);
+  const payload={ok:false,errorCode:'DATA_TABLE_ROLLBACK_FAILED',errorMessage:'Original values could not be restored',details:{rollback:'failed'}};
+  const wrapped={content:[{type:'text',text:JSON.stringify({returnValue:JSON.stringify(payload)})}]};
+  await editor(bridge,m=>({ok:true,result:m.method==='mcp_discover'?{content:[{type:'text',text:JSON.stringify({tools:[{name:'DSHUnrealBridge.DSHDataTableToolset.SetStructField',inputSchema:{type:'object',properties:{}}}]})}]}:wrapped}));
+  await assert.rejects(bridge.mcpCallToolset('chat',{toolsetName:'DSHUnrealBridge.DSHDataTableToolset',toolName:'SetStructField',arguments:{},requestId:randomUUID()}),e=>e.code==='MCP_TOOL_ERROR'&&e.message===payload.errorMessage&&e.details.ueErrorCode===payload.errorCode);
+  assert.equal(bridge.state('chat').writeLock.rollback,'failed');
+});
+
 test('unsafe DataTable and desktop MCP routes are rejected before dispatch',async t=>{
   const bridge=await fixture(t);const calls=await editor(bridge,message=>({ok:true,result:message.method==='mcp_discover'?{content:[{type:'text',text:JSON.stringify({tools:[{name:'DataTableTools.get_rows',inputSchema:{type:'object',properties:{}}}]})}]}:{}}));
   for(const [toolsetName,toolName] of [['DataTableTools','set_rows'],['DataTableTools','add_rows'],['DataTableTools','rename_rows'],['SlateInspectorToolset','Click'],['ProgrammaticToolset','execute_tool_script']]){

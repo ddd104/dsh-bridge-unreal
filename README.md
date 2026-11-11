@@ -2,7 +2,7 @@
 
 DeepSeek Harness（DSH）的 Unreal Editor 桥接插件。每个对话可以独立绑定本机 UE 编辑器，显示资产、Actor、组件选区，并使用蓝图、材质、MCP、项目知识、运行快照和图像分析工具。
 
-本仓库提供 **DSH 端插件**安装入口，版本为 **0.6.2**，基于原仓库 0.6.1 拆分，适配 DSH **0.2.1-rc.2**。UE 工程侧需要另外将 [DSHUnrealBridge 插件](unreal/DSHUnrealBridge)导入项目、编译并启用。
+本仓库提供 **DSH 端插件**安装入口，版本为 **0.6.3**，同步原仓库 0.6.1 的最新实现，适配 DSH **0.2.1-rc.2**。UE 工程侧需要另外将 [DSHUnrealBridge 插件](unreal/DSHUnrealBridge)导入项目、编译并启用。
 
 **仅支持 Unreal Engine 5.8（UE 5.8.x），不支持其他 UE 版本。** 请使用 UE 5.8 创建或打开目标项目，并使用同一引擎版本编译插件。
 
@@ -93,16 +93,18 @@ MyProject/
 
 项目知识功能还需要固定版本的 Node 运行时和已构建的知识工具。如果导入的插件尚未包含准备好的 `Runtime` 和工具构建产物：
 
-1. 获取原仓库 `ddd104/dsh-unreal-bridge`。
-2. 在**原仓库根目录**运行以下命令。该准备脚本不在本仓库中。
+1. 在本机安装 Node.js 22+ 和 npm，并打开本仓库根目录。
+2. 在**本仓库根目录**运行以下命令，下载并校验固定版本的 Node 运行时、构建配套知识工具。
 
    ```powershell
    powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\prepare-knowledge.ps1
    ```
 
-3. 将准备好的插件中的 `Runtime`、`Tools` 目录复制到目标项目的 `Plugins/DSHUnrealBridge` 下，保持与该 UE 插件源码版本配套，然后重新打开项目。
+3. 将本仓库 `unreal/DSHUnrealBridge` 中准备好的 `Runtime`、`Tools` 目录复制到目标项目的 `Plugins/DSHUnrealBridge` 下，保持与该 UE 插件源码版本配套，然后重新打开项目。
 
 原仓库的 `install-dsh.bat` 同时处理旧版 DSH 安装流程；已通过本仓库安装 DSH 端时，可按上面的步骤单独准备 UE 端。
+
+本次两端同步增加了 DataTable 字段批量修改能力：支持预览后提交、嵌套字段及已有 Map 键和数组元素修改、从原值深复制，提交后不自动保存。使用该能力需要同时更新 DSH 端并重新编译 UE 端；参数说明见[工具与通信协议](docs/protocol.md)。
 
 ## 第三步：绑定编辑器并确认选区
 

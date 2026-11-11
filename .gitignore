@@ -9,3 +9,11 @@ dist/
 bridge.json
 audit*.jsonl
 lib/*.map
+unreal/**/Binaries/
+unreal/**/Intermediate/
+unreal/**/Saved/
+unreal/**/DerivedDataCache/
+unreal/**/Cache/
+unreal/**/Runtime/
+*.pdb
+.vs/

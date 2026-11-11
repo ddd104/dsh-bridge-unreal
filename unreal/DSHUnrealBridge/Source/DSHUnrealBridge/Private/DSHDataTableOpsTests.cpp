@@ -42,6 +42,9 @@ struct FTableFixture
         Values.Colors.Add(TEXT("Normal"), FLinearColor(0.123456f, 0.5f, 0.8f, 1.0f));
         Values.Samples.Add(FVector(Index * 1.23456789, -Index, 100000.25));
         Result.RenderTargetColors.Add(TEXT("Body"), Values);
+        Result.ColorTypeMaterialParams.Add(EDSHDataTableTestColor::Green, Values);
+        Values.Colors[TEXT("Warning")] = FLinearColor(0.123456789f, 0.234567891f, Index * 0.25f, 1.0f);
+        Result.ColorTypeMaterialParams.Add(EDSHDataTableTestColor::Blue, Values);
         Result.FloatParameters.Add(TEXT("Warning"), Index * 1.25f);
         Result.VectorParameters.Add(TEXT("Offset"), FVector(Index, Index + 0.75, -Index));
         Result.AnimToPlay = TSoftObjectPtr<UObject>(FSoftObjectPath(TEXT("/Game/Fixture/Anim_") + FString::FromInt(Index) + TEXT(".Anim_") + FString::FromInt(Index)));
@@ -209,6 +212,101 @@ bool FDSHDataTableCopyUndo::RunTest(const FString&)
     TestTrue(TEXT("One undo succeeds"), GEditor->UndoTransaction());
     TestTrue(TEXT("Single undo restores every target"), SameRow(Fixture.Get(TEXT("Car")), Car) && SameRow(Fixture.Get(TEXT("Bus")), Bus));
     TestTrue(TEXT("Undo preserves source"), SameRow(Fixture.Get(TEXT("Predestrian")), Source));
+    return true;
+}
+namespace
+{
+TSharedPtr<FJsonObject> PatchParams(const FTableFixture& Fixture, bool bDryRun = false)
+{
+    auto Result = MakeShared<FJsonObject>();
+    Result->SetStringField(TEXT("assetPath"), Fixture.Path);
+    Result->SetBoolField(TEXT("dryRun"), bDryRun);
+    auto Op = MakeShared<FJsonObject>(); Op->SetStringField(TEXT("op"), TEXT("copy"));
+    TArray<TSharedPtr<FJsonValue>> To, From;
+    for (const TCHAR* Part : {TEXT("colorTypeMaterialParams"), TEXT("Green")}) To.Add(MakeShared<FJsonValueString>(Part));
+    for (const TCHAR* Part : {TEXT("ColorTypeMaterialParams"), TEXT("Blue")}) From.Add(MakeShared<FJsonValueString>(Part));
+    Op->SetArrayField(TEXT("path"), To); Op->SetArrayField(TEXT("sourcePath"), From);
+    Result->SetArrayField(TEXT("operations"), {MakeShared<FJsonValueObject>(Op)});
+    return Result;
+}
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FDSHDataTablePatchPreservation, "DSH.Bridge.DataTablePatch.Preservation",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FDSHDataTablePatchPreservation::RunTest(const FString&)
+{
+    FTableFixture Fixture;
+    const FDSHDataTableCopyTestRow Original = *Fixture.Get(TEXT("Car"));
+    FDSHDataTableCopyTestRow Expected = Original;
+    Expected.ColorTypeMaterialParams[EDSHDataTableTestColor::Green] = Expected.ColorTypeMaterialParams[EDSHDataTableTestColor::Blue];
+    FString Code, Error; TSharedPtr<FJsonObject> Details;
+    auto Preview = FDSHDataTableOps::Patch(PatchParams(Fixture, true), Code, Error, Details);
+    if (!TestTrue(TEXT("Preview supports JSON field aliases and enum keys: ") + Error, Preview.IsValid())) return false;
+    TestTrue(TEXT("Preview preserves entire row"), SameRow(Fixture.Get(TEXT("Car")), Original));
+    TestFalse(TEXT("Preview leaves package clean"), Fixture.Table->GetOutermost()->IsDirty());
+    auto Result = FDSHDataTableOps::Patch(PatchParams(Fixture), Code, Error, Details);
+    if (!TestTrue(TEXT("Native batch succeeds: ") + Error, Result.IsValid())) return false;
+    TestEqual(TEXT("All rows changed"), Result->GetNumberField(TEXT("changedRows")), 4.0);
+    TestTrue(TEXT("Only Green changed; maps, arrays, references and precision preserved"), SameRow(Fixture.Get(TEXT("Car")), Expected));
+    const auto* Bus = Fixture.Get(TEXT("Bus"));
+    TestEqual(TEXT("Each row uses its own original Blue"), Bus->ColorTypeMaterialParams[EDSHDataTableTestColor::Green].Colors[TEXT("Warning")], Bus->ColorTypeMaterialParams[EDSHDataTableTestColor::Blue].Colors[TEXT("Warning")]);
+    auto NoOp = FDSHDataTableOps::Patch(PatchParams(Fixture), Code, Error, Details);
+    if (TestTrue(TEXT("Repeat is verified no-op"), NoOp.IsValid())) TestEqual(TEXT("No extra changes"), NoOp->GetNumberField(TEXT("changedRows")), 0.0);
+    TestTrue(TEXT("Single undo restores patch"), GEditor->UndoTransaction());
+    TestTrue(TEXT("Undo restores full original row"), SameRow(Fixture.Get(TEXT("Car")), Original));
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FDSHDataTablePatchValidation, "DSH.Bridge.DataTablePatch.Validation",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FDSHDataTablePatchValidation::RunTest(const FString&)
+{
+    FTableFixture Fixture;
+    const FDSHDataTableCopyTestRow Original = *Fixture.Get(TEXT("Car"));
+    FString Code, Error; TSharedPtr<FJsonObject> Details;
+    auto Params = PatchParams(Fixture);
+    auto Set = MakeShared<FJsonObject>(); Set->SetStringField(TEXT("op"), TEXT("set")); Set->SetNumberField(TEXT("value"), 4.25);
+    TArray<TSharedPtr<FJsonValue>> Path;
+    for (const TCHAR* Part : {TEXT("renderTargetColors"), TEXT("Body"), TEXT("samples"), TEXT("0"), TEXT("x")}) Path.Add(MakeShared<FJsonValueString>(Part));
+    Set->SetArrayField(TEXT("path"), Path);
+    Params->SetArrayField(TEXT("rows"), {MakeShared<FJsonValueString>(TEXT("Car"))});
+    Params->SetArrayField(TEXT("operations"), {MakeShared<FJsonValueObject>(Set)});
+    auto Result = FDSHDataTableOps::Patch(Params, Code, Error, Details);
+    if (!TestTrue(TEXT("Nested scalar array edit succeeds: ") + Error, Result.IsValid())) return false;
+    auto Expected = Original; Expected.RenderTargetColors[TEXT("Body")].Samples[0].X = 4.25;
+    TestTrue(TEXT("Only requested scalar changes"), SameRow(Fixture.Get(TEXT("Car")), Expected));
+    GEditor->UndoTransaction(); Fixture.Table->GetOutermost()->SetDirtyFlag(false);
+    auto Missing = MakeShared<FJsonObject>(); Missing->SetStringField(TEXT("op"), TEXT("set")); Missing->SetNumberField(TEXT("value"), 9);
+    Missing->SetArrayField(TEXT("path"), {MakeShared<FJsonValueString>(TEXT("FloatParameters")), MakeShared<FJsonValueString>(TEXT("Missing"))});
+    Params->SetArrayField(TEXT("operations"), {MakeShared<FJsonValueObject>(Set), MakeShared<FJsonValueObject>(Missing)});
+    TestFalse(TEXT("Invalid later operation rejects whole batch"), FDSHDataTableOps::Patch(Params, Code, Error, Details).IsValid());
+    TestTrue(TEXT("Staged earlier operation did not leak"), SameRow(Fixture.Get(TEXT("Car")), Original));
+    TestFalse(TEXT("Rejected edit leaves clean"), Fixture.Table->GetOutermost()->IsDirty());
+    Set->SetArrayField(TEXT("path"), {MakeShared<FJsonValueString>(TEXT("Sentinels")), MakeShared<FJsonValueString>(TEXT("1"))});
+    Params->SetArrayField(TEXT("operations"), {MakeShared<FJsonValueObject>(Set)});
+    for (double Invalid : {4.25, 1.e20})
+    {
+        Set->SetNumberField(TEXT("value"), Invalid);
+        TestFalse(TEXT("Fractional/overflow integer rejected"), FDSHDataTableOps::Patch(Params, Code, Error, Details).IsValid());
+        TestTrue(TEXT("Rejected value preserves original"), SameRow(Fixture.Get(TEXT("Car")), Original));
+    }
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FDSHDataTablePatchRollback, "DSH.Bridge.DataTablePatch.Rollback",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FDSHDataTablePatchRollback::RunTest(const FString&)
+{
+    FTableFixture Fixture;
+    const auto Original = *Fixture.Get(TEXT("Car"));
+    const auto Handle = Fixture.Table->OnDataTableChanged().AddLambda([&]() { Fixture.Get(TEXT("Car"))->Label = TEXT("Corrupted by callback"); });
+    FString Code, Error; TSharedPtr<FJsonObject> Details;
+    const auto Result = FDSHDataTableOps::Patch(PatchParams(Fixture), Code, Error, Details);
+    Fixture.Table->OnDataTableChanged().Remove(Handle);
+    TestFalse(TEXT("Callback corruption fails"), Result.IsValid());
+    TestEqual(TEXT("Rollback verified"), Details->GetStringField(TEXT("rollback")), FString(TEXT("restored")));
+    TestTrue(TEXT("Original fully restored"), SameRow(Fixture.Get(TEXT("Car")), Original));
+    TestFalse(TEXT("Dirty state restored"), Fixture.Table->GetOutermost()->IsDirty());
     return true;
 }
 #endif

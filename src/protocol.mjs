@@ -28,6 +28,15 @@ export const mcpDescribeSchema = z.object({toolsetName:mcpToolName,query:z.strin
 export const mcpCallSchema = z.object({name:mcpToolName,arguments:mcpArguments.default({}),requestId:z.string().uuid()}).strict();
 export const mcpToolsetCallSchema = z.object({toolsetName:mcpToolName,toolName:mcpToolName,arguments:mcpArguments.default({}),requestId:z.string().uuid()}).strict();
 export const dataTableCopySchema = z.object({assetPath,sourceRow:z.string().min(1).max(1024),propertyName:z.string().min(1).max(160).regex(/^[A-Za-z_][A-Za-z0-9_]*$/),targetRows:z.array(z.string().min(1).max(1024)).min(1).max(4096).optional(),requestId:z.string().uuid()}).strict();
+const dataTablePath=z.array(z.string().min(1).max(160)).min(1).max(32).describe('Path segments: reflected field names (or their get_rows JSON spelling), existing map keys including enum names, and decimal array indices. Each key is one segment even if it contains dots.');
+export const dataTablePatchSchema=z.object({
+  assetPath,rows:z.array(z.string().min(1).max(1024)).min(1).max(4096).optional().describe('Existing rows to modify. Omit for every row.'),
+  operations:z.array(z.discriminatedUnion('op',[
+    z.object({op:z.literal('set'),path:dataTablePath,value:z.union([z.string().max(8192),z.number(),z.boolean()])}).strict(),
+    z.object({op:z.literal('copy'),path:dataTablePath,sourcePath:dataTablePath,sourceRow:z.string().min(1).max(1024).optional().describe('Omit to copy from the same row. All sources use original values before this batch.')}).strict(),
+  ])).min(1).max(64),
+  dryRun:z.boolean().default(true),requestId:z.string().uuid(),
+}).strict();
 export const materialAssetPath=z.string().min(1).max(2048).regex(/^\/[A-Za-z0-9_]+(?:\/[A-Za-z0-9_]+)+(?:\.[A-Za-z0-9_]+)?$/).describe('Exact material or material-function asset package/object path, including project or plugin mounts. Not a level or expression subobject.');
 const expressionClass=z.string().max(512).regex(/^\/Script\/[A-Za-z0-9_]+\.[A-Za-z0-9_]+$/).describe('Exact loaded native UMaterialExpression subclass path, obtained from current class metadata.');
 const materialProperties=z.record(z.string().min(1).max(160),z.json()).describe('Reflected editable properties using the native schema. Structural ownership, GUID and direct connection fields are forbidden; use graph operations.');

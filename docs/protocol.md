@@ -36,6 +36,7 @@ Remote `unrealBridge.state(agent)`、`bind(agent, editorId)` 与 `unreal_state` 
 | `unreal_mcp_call_toolset` | `toolsetName`、`toolName`、`arguments`、UUID `requestId`；`toolName` 接受短名或当前工具集完整名，参数预检通过后调用 |
 | `unreal_mcp_call` | `name`、`arguments`、UUID `requestId`，默认直接调用顶层 MCP 工具 |
 | `unreal_data_table_copy_property` | `assetPath`、`sourceRow`、`propertyName`、UUID `requestId`，可选 `targetRows`；原生深复制指定字段，验证并回滚，不保存 |
+| `unreal_data_table_patch` | `assetPath`、`operations`、UUID `requestId`，可选 `rows`、`dryRun`（默认 true）；批量预览或修改行内字段，支持 `set` 标量叶子及 `copy` 原生深复制，不保存 |
 | `unreal_read_blueprint` | `assetPath`，可选 `graph`、`nodeIds`、`detail: summary/full` |
 | `unreal_level_blueprint` | `mapPath`，只读定位地图内的关卡蓝图，返回 `blueprint:{refPath}`、`graphs`、`mapPath` 和 `saveTarget:{refPath}`，供 MCP 图工具使用 |
 | `unreal_focus_asset` | `assetPath`，可选 `graph`、`nodeIds`；对已加载且受支持的真实资产或图引用排队展示，保留关卡子对象路径；不打开地图，需 `safe_asset_presentation` 能力 |
@@ -107,6 +108,12 @@ BlueprintTools 与 ObjectTools 调用另需 `mcp_operation_context` 能力，`un
 已审计的蓝图查询为 `get_default_object/list_graphs/find_nodes/get_node_infos`，对象查询为 `get_class/get_properties/list_properties`，可以在只读模式、单问题停止或写入结果未知时用于诊断。`read_graph_dsl` 和 `get_node_type_pins` 会在真实图中临时增删节点，不属于只读豁免。工具名称前缀或调用者提供的 `readOnlyHint` 不改变这一分类。
 
 ### DataTable 写入与宿主错误恢复
+
+`data_table_patch` 能力启用行内字段批次编辑，需要同时更新 DSH 和 UE 插件。`rows` 省略表示全部行；`operations` 为 1–64 项 `set` 或 `copy`。`path`、`sourcePath` 使用字符串数组，可穿过结构字段、已有 Map 键（含枚举键）及数组下标，接受精确反射字段名及 `get_rows` 返回的 JSON 别名。`set` 修改数值、布尔、字符串、名称或枚举等标量叶子；`copy` 从同一行或显式 `sourceRow` 的原始值深复制类型匹配的字段，所有源值都取自本批操作开始前。
+
+先使用默认 `dryRun:true` 预览，再换新 UUID 并指定 `dryRun:false` 提交。完整批次预检、验证全部行、失败回滚，实际修改支持 UE 撤销且不自动保存。复杂结构及容器不通过整表 JSON 回写。缺少能力时返回需要更新 UE 插件的错误。
+
+示例操作：`{"op":"copy","path":["ColorTypeMaterialParams","Green"],"sourcePath":["ColorTypeMaterialParams","Blue"]}`，表示每行的 Green 字段取该行原有 Blue 字段的值。
 
 `data_table_copy_property` 能力启用原生字段复制请求。`sourceRow` 与目标行名最长 1024 字符，`propertyName` 为最多 160 字符的精确反射属性名；`targetRows` 省略时选择除源行外所有行，显式数组必须非空、无重复、不含源行，最多 4096 行。预检无效参数不会写入资产。操作在 GameThread 内以单次事务深复制字段，验证源行、目标字段、其他字段和行集合，失败恢复内存快照及原始 dirty 状态。成功返回 `assetPath/sourceRow/propertyName/targetCount/changedRows/unchangedRows/verified/saved/dirtyBefore/dirtyAfter`；`verified:true`、`saved:false`。不触发窗口聚焦。
 

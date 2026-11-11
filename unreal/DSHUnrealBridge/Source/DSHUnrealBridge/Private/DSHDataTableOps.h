@@ -7,6 +7,8 @@
 class FDSHDataTableOps
 {
 public:
+    static TSharedPtr<FJsonObject> Patch(const TSharedPtr<FJsonObject>& Params,
+        FString& ErrorCode, FString& ErrorMessage, TSharedPtr<FJsonObject>& ErrorDetails);
     static TSharedPtr<FJsonObject> CopyProperty(const TSharedPtr<FJsonObject>& Params,
         FString& ErrorCode, FString& ErrorMessage, TSharedPtr<FJsonObject>& ErrorDetails);
 };

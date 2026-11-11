@@ -1,8 +1,26 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {shortToolName,describeTools,validateMcpArguments,isReadOnlyMcpCall,mcpFailure,MATERIAL_TOOLSET,MATERIAL_READ_TOOLS} from '../src/mcp-contract.mjs';
+import {shortToolName,describeTools,validateMcpArguments,isReadOnlyMcpCall,mcpFailure,mcpErrorPayload,MATERIAL_TOOLSET,MATERIAL_READ_TOOLS} from '../src/mcp-contract.mjs';
 
 const DATA_TABLE='editor_toolset.toolsets.data_table.DataTableTools';
+
+test('reflected string return failures preserve native messages without inspecting arbitrary asset data',()=>{
+  const payload={ok:false,errorCode:'PROPERTY_PATH_UNRESOLVED',errorMessage:'Enum map key could not be resolved',details:{rollback:'not_needed'}};
+  for(const result of [
+    {content:[{type:'text',text:JSON.stringify({returnValue:JSON.stringify(payload)})}]},
+    {structuredContent:{returnValue:JSON.stringify(payload)}},
+    {isError:true,content:[{type:'text',text:JSON.stringify({returnValue:JSON.stringify(payload)})}]},
+  ]){
+    assert.deepEqual(mcpErrorPayload(result),payload);
+    const error=mcpFailure(result,'failed-id');
+    assert.equal(error.message,payload.errorMessage);
+    assert.equal(error.details.ueErrorCode,payload.errorCode);
+    assert.equal(error.details.ueResult,result);
+    assert.equal(error.details.rollback,'not_available');
+  }
+  assert.equal(mcpErrorPayload({content:[{type:'text',text:JSON.stringify({returnValue:JSON.stringify({rows:{Car:{ok:false}},note:'error'})})}]}),null);
+  assert.equal(mcpErrorPayload({content:[{type:'text',text:'ordinary diagnostic text'}]}),null);
+});
 const description=tools=>({content:[{type:'text',text:JSON.stringify({tools})}]});
 const schema={
   type:'object',required:['refPath','limit'],properties:{

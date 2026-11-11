@@ -2,10 +2,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import {join} from 'node:path';
+import {fileURLToPath} from 'node:url';
 import {AUDITED_MCP_READS,isReadOnlyMcpCall} from '../src/mcp-contract.mjs';
 
-const ueRoot = process.env.DSH_UE_PLUGIN_ROOT;
-test('host and editor exempt exactly the same audited MCP queries from mutation coordination',{skip: !ueRoot && 'Set DSH_UE_PLUGIN_ROOT to run the UE cross-repository contract checks'},async()=>{
+const ueRoot = process.env.DSH_UE_PLUGIN_ROOT || fileURLToPath(new URL('../unreal/DSHUnrealBridge/', import.meta.url));
+test('host and editor exempt exactly the same audited MCP queries from mutation coordination',async()=>{
   const native=await readFile(join(ueRoot,'Source/DSHUnrealBridge/Private/DSHUnrealBridgeModule.cpp'),'utf8');
   const nativeDeclaration=native.match(/static const TSet<FString> Reads=\{([^}]+)\}/)?.[1];
   assert.ok(nativeDeclaration,'The native mutation coordinator must declare its exact audited read policy');

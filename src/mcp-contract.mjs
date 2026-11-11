@@ -84,12 +84,30 @@ export function requiresMcpOperationContext(call){
 }
 
 /** Preserve UE evidence while allowing a state-aware correction, not blind replay. */
+export function mcpErrorPayload(result){
+  // UE reflected FString returns are JSON inside content[].text.returnValue.
+  // Inspect only transport envelopes, never arbitrary fields in asset row data.
+  const parse=value=>{if(typeof value!=='string')return value;try{return JSON.parse(value);}catch{return null;}};
+  const visit=(value,depth)=>{
+    if(depth>4)return null;
+    value=parse(value);
+    if(!value||typeof value!=='object'||Array.isArray(value))return null;
+    for(const inner of [value.returnValue,value.structuredContent,...(Array.isArray(value.content)?value.content.filter(b=>b?.type==='text').map(b=>b.text):[])]){
+      const error=visit(inner,depth+1);if(error)return error;
+    }
+    return value.isError===true||value.ok===false?value:null;
+  };
+  return visit(result,0);
+}
+
 export function mcpFailure(result,requestId=null,readOnly=false){
-  const text=(result?.content??[]).filter(item=>item.type==='text').map(item=>item.text).join('\n')||result?.error?.message||result?.message||'The UE MCP tool reported failure';
+  const payload=mcpErrorPayload(result)??result;
+  const text=(payload?.content??[]).filter(item=>item.type==='text').map(item=>item.text).join('\n')||payload?.error?.message||payload?.errorMessage||payload?.message||'The UE MCP tool reported failure';
   // Preserve explicit unsafe-state evidence through the MCP envelope. A
   // third-party "restored" claim alone must not establish rollback guarantees.
-  const unsafe=isUnsafeWriteError(result);
+  const unsafe=isUnsafeWriteError(result)||isUnsafeWriteError(payload)||isUnsafeWriteError({code:payload?.errorCode});
   return new BridgeError(readOnly?'MCP_READ_ERROR':'MCP_TOOL_ERROR',text,{
-    retryable:!unsafe,recovery:unsafe?'stop_writes':readOnly?'correct_and_retry':'verify_before_retry',readOnly,rollback:unsafe?'failed':readOnly?'not_needed':'not_available',requestId,ueResult:result
+    retryable:!unsafe,recovery:unsafe?'stop_writes':readOnly?'correct_and_retry':'verify_before_retry',readOnly,rollback:unsafe?'failed':readOnly?'not_needed':'not_available',requestId,ueResult:result,
+    ...(payload?.errorCode?{ueErrorCode:payload.errorCode}:{})
   });
 }

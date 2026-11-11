@@ -9,7 +9,8 @@ import { VERSION, helloSchema, selectionSchema, patchSchema, createSchema, readS
 import { assertSafeMcpCall } from './mcp-policy.mjs';
 import {levelBlueprintSchema} from './protocol.mjs';
 import {materialReadSchema,materialPatchSchema} from './protocol.mjs';
-import {shortToolName,describeTools,validateMcpArguments,isReadOnlyMcpCall,mcpFailure,mcpOperationToolName,requiresMcpOperationContext} from './mcp-contract.mjs';
+import {dataTablePatchSchema} from './protocol.mjs';
+import {shortToolName,describeTools,validateMcpArguments,isReadOnlyMcpCall,mcpFailure,mcpErrorPayload,mcpOperationToolName,requiresMcpOperationContext} from './mcp-contract.mjs';
 import {isUnsafeWriteError} from './write-safety.mjs';
 import {EditorWrites} from './editor-writes.mjs';
 import {rememberMaterialRead,validateMcpOperationContext} from './operation-context.mjs';
@@ -278,6 +279,18 @@ export class UnrealBridge extends EventEmitter {
   }
   async mcpCallToolset(sessionId,args,signal,admit){const {toolsetName,toolName,arguments:toolArgs,requestId}=mcpToolsetCallSchema.parse(args);return this.mcpCall(sessionId,{name:'call_tool',arguments:{toolset_name:toolsetName,tool_name:toolName,arguments:toolArgs},requestId},signal,admit);}
   async copyDataTableProperty(sessionId,args,signal){const {requestId,...params}=dataTableCopySchema.parse(args);if(!this.target(sessionId).capabilities.includes('data_table_copy_property'))fail('DATA_TABLE_COPY_UNAVAILABLE','Update the UE bridge plugin to copy DataTable properties safely; do not fall back to set_rows or desktop input',{retryable:false});return this.mutate(sessionId,'data_table_copy_property',params,requestId,signal);}
+  async patchDataTable(sessionId,args,signal){
+    const {requestId,...params}=dataTablePatchSchema.parse(args),editor=this.target(sessionId);
+    if(!editor.capabilities.includes('data_table_patch'))fail('DATA_TABLE_PATCH_UNAVAILABLE','Update the UE bridge plugin for nested DataTable edits. Stop this operation; do not retry set_rows or rebuild the plugin during an asset-edit task.',{execution:'not_started',retryable:false});
+    if(params.dryRun){
+      const bindingVersion=this.bindingVersions.get(sessionId);
+      const result=await this.request(editor,'data_table_patch',params,{id:requestId,signal});
+      if(this.target(sessionId)!==editor||this.bindingVersions.get(sessionId)!==bindingVersion)fail('INSTANCE_CHANGED','Editor binding changed during DataTable preview');
+      if(result?.verified!==true||result?.dryRun!==true)fail('DATA_TABLE_PREVIEW_INVALID','Editor did not return a verified DataTable preview',{execution:'completed',retryable:false});
+      return result;
+    }
+    return this.mutate(sessionId,'data_table_patch',params,requestId,signal);
+  }
   async materialRead(sessionId,args,signal){
     const params=materialReadSchema.parse(args),editor=this.target(sessionId),bindingVersion=this.bindingVersions.get(sessionId);
     if(!editor.capabilities.includes('material_graph_patch'))fail('MATERIAL_TOOLS_UNAVAILABLE','Update the UE bridge plugin to read and patch material graphs',{execution:'not_started',retryable:false});
@@ -353,8 +366,8 @@ export class UnrealBridge extends EventEmitter {
       dispatched=true;
       const wireParams=method==='mcp_call_tool'&&options.operationToken?{...params,operationToken:options.operationToken}:params;
       const result=await this.request(editor,method,wireParams,{id:requestId,signal,timeoutMs});
-      if(method==='mcp_call_tool'&&(result?.isError===true||result?.ok===false))throw mcpFailure(result,requestId,readOnly);
-      if(method==='data_table_copy_property'&&result?.verified!==true)fail('DATA_TABLE_ROLLBACK_FAILED','The DataTable copy did not return a verified result; stop writes and inspect the editor',{retryable:false,rollback:'failed',requestId});
+      if(method==='mcp_call_tool'&&mcpErrorPayload(result))throw mcpFailure(result,requestId,readOnly);
+      if(['data_table_copy_property','data_table_patch'].includes(method)&&(result?.verified!==true||(method==='data_table_patch'&&result?.dryRun!==false)))fail('DATA_TABLE_ROLLBACK_FAILED','The DataTable copy did not return a verified result; stop writes and inspect the editor',{retryable:false,rollback:'failed',requestId});
       if(method==='material_patch'&&(result?.verified!==true||result?.dryRun!==false))fail('ROLLBACK_FAILED','The material write did not return a verified commit result; the editor remains protected',{retryable:false,rollback:'failed',requestId});
       this.cacheResult(key,{hash,result});
       await this.audit({phase:'completed',sessionId,editorId:editor.editorId,requestId,method,revision:result?.revision}).catch(e=>this.emit('diagnostic',`Audit completion failed: ${e.message}`));
@@ -393,9 +406,9 @@ export class UnrealBridge extends EventEmitter {
         :typeof response.error?.code==='string'&&typeof response.error?.message==='string');
       if(!valid)fail('INVALID_REQUEST_STATUS','The completed write response is malformed; the editor remains protected');
       let error=result.response.ok?null:new BridgeError(result.response.error.code,result.response.error.message,result.response.error.details);
-      if(!error&&lease.method==='data_table_copy_property'&&result.response.result?.verified!==true)error=new BridgeError('DATA_TABLE_ROLLBACK_FAILED','The recovered copy result is unverified',{rollback:'failed',retryable:false,requestId});
+      if(!error&&['data_table_copy_property','data_table_patch'].includes(lease.method)&&(result.response.result?.verified!==true||(lease.method==='data_table_patch'&&result.response.result?.dryRun!==false)))error=new BridgeError('DATA_TABLE_ROLLBACK_FAILED','The recovered copy result is unverified',{rollback:'failed',retryable:false,requestId});
       if(!error&&lease.method==='material_patch'&&(result.response.result?.verified!==true||result.response.result?.dryRun!==false))error=new BridgeError('ROLLBACK_FAILED','The recovered material commit is unverified',{rollback:'failed',retryable:false,requestId});
-      if(!error&&lease.method==='mcp_call_tool'&&(result.response.result?.isError===true||result.response.result?.ok===false))error=mcpFailure(result.response.result,requestId);
+      if(!error&&lease.method==='mcp_call_tool'&&mcpErrorPayload(result.response.result))error=mcpFailure(result.response.result,requestId);
       if(error)this.lockUnsafeWrite(editor.editorId,error,lease);
       const original=this.uncertain.get(lease.sessionId);
       if(original?.requestId===requestId&&original.editorId===editor.editorId)this.uncertain.delete(lease.sessionId);

@@ -154,8 +154,8 @@ export function operationContext(bridge,sessionId,name,args={},nativeEvidence){
     let preview;
     try{preview=bridge.previewRecord(sessionId,args?.previewId);}catch{}
     kind='write';family='blueprint_edit';target=canonicalTarget(preview?.params?.assetPath,true);
-  }else if(name==='unreal_data_table_copy_property'){
-    kind='write';family='data_table_edit';target=canonicalTarget(args?.assetPath,true);
+  }else if(name==='unreal_data_table_copy_property'||name==='unreal_data_table_patch'){
+    kind=name==='unreal_data_table_patch'&&args?.dryRun!==false?'preview':'write';family='data_table_edit';target=canonicalTarget(args?.assetPath,true);
   }else if(name==='unreal_material_read'||name==='unreal_material_patch'){
     kind=name==='unreal_material_read'?'read':args?.dryRun===false?'write':'preview';
     family='material_edit';target=canonicalTarget(args?.assetPath,true);

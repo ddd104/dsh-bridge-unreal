@@ -19,7 +19,7 @@ npm run package:dsh
 
 `dist/dsh/` 中包含：
 
-- `dsh-unreal-bridge-0.6.2.tgz`
+- `dsh-unreal-bridge-0.6.3.tgz`
 - `install-dsh.bat`
 - `install-dsh-release.ps1`
 - `resolve-dsh-cli.ps1`

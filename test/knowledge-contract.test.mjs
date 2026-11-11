@@ -3,12 +3,12 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { knowledgeSchema, knowledgeRecordSchema } from '../src/protocol.mjs';
 import {resolve, join} from 'node:path';
-import {pathToFileURL} from 'node:url';
+import {pathToFileURL, fileURLToPath} from 'node:url';
 
-// Optional cross-repository contract check; the UE implementation is not shipped here.
-const ueRoot = process.env.DSH_UE_PLUGIN_ROOT;
+// Verify the UE implementation shipped in this repository unless explicitly overridden.
+const ueRoot = process.env.DSH_UE_PLUGIN_ROOT || fileURLToPath(new URL('../unreal/DSHUnrealBridge/', import.meta.url));
 
-test('knowledge host schemas and worker admission match the native routing catalog', {skip: !ueRoot && 'Set DSH_UE_PLUGIN_ROOT to run the UE cross-repository contract checks'}, async () => {
+test('knowledge host schemas and worker admission match the native routing catalog', async () => {
   const {workerToolNames} = await import(pathToFileURL(resolve(ueRoot, 'Tools/knowledge-tools.mjs')).href);
   const source = await readFile(join(ueRoot, 'Source/DSHUnrealBridgeKnowledge/Private/ProjectKnowledgeTools.inl'), 'utf8');
   const declarations = source.split(/\r?\n/).filter(line => line.startsWith('DSH_KNOWLEDGE_TOOL('));
