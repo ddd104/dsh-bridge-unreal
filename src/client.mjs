@@ -1,4 +1,4 @@
-import React,{useEffect,useState,useSyncExternalStore} from 'react';
+import React,{useEffect,useRef,useState,useSyncExternalStore} from 'react';
 import {TYPERT_REMOTE} from './remote.mjs';
 import {registerVisualToolviews} from './visual-client.mjs';
 import {registerSettingsClient} from './settings-client.mjs';
@@ -29,18 +29,23 @@ const captureTime=value=>{const date=new Date(value);return Number.isNaN(date.ge
 
 export const inject=['slots','sessions','remote'];
 
-export function UnrealDock({read,bind}) {
+export function UnrealDock({read,bind,editAssetCandidates}) {
   const [state,setState]=useState(null);
   const [error,setError]=useState('');
   const [busy,setBusy]=useState(false);
   const [expanded,setExpanded]=useState(false);
+  const [liveExpanded,setLiveExpanded]=useState(false);
+  const contextVersion=useRef(0);
 
   useEffect(()=>{
+    ++contextVersion.current;
     let active=true;
     let timer;
     let interval=700;
     setState(null);
     setExpanded(false);
+    setLiveExpanded(false);
+    setBusy(false);
     const refresh=async()=>{
       try{
         const next=await read();
@@ -50,19 +55,33 @@ export function UnrealDock({read,bind}) {
       finally{if(active)timer=setTimeout(refresh,interval);}
     };
     refresh();
-    return()=>{active=false;clearTimeout(timer);};
+    return()=>{active=false;++contextVersion.current;clearTimeout(timer);};
   },[read]);
 
   const select=async event=>{
+    const context=contextVersion.current;
     setBusy(true);
     setExpanded(false);
-    try{setState(await bind(event.target.value||null));setError('');}
-    catch(e){setError(e.message??String(e));}
-    finally{setBusy(false);}
+    try{const next=await bind(event.target.value||null);if(context===contextVersion.current){setState(previous=>previous&&previous.version>next.version?previous:next);setError('');}}
+    catch(e){if(context===contextVersion.current)setError(e.message??String(e));}
+    finally{if(context===contextVersion.current)setBusy(false);}
+  };
+
+  const editCandidates=async(action,paths)=>{
+    const context=contextVersion.current;
+    setBusy(true);
+    try{
+      const next=await editAssetCandidates({editorId:state.editorId,revision:state.assetCandidates.revision,action,...(paths?{paths}:{})});
+      if(context===contextVersion.current){setState(previous=>previous&&previous.version>next.version?previous:next);setError('');}
+    }catch(e){if(context===contextVersion.current)setError(e.message??String(e));}
+    finally{if(context===contextVersion.current)setBusy(false);}
   };
 
   const assets=state?.selection??[];
   const connected=!!state?.connected;
+  const manual=state?.selectionMode==='manual_assets';
+  const live=manual?state?.liveSelection??[]:[];
+  const canEditCandidates=connected&&!busy&&!!state?.assetCandidates&&!!editAssetCandidates;
   const count=assets.length;
   const types=[...new Set(assets.map(selectionType))];
   const selectionLabel=types.length===1?types[0]:'对象';
@@ -98,19 +117,31 @@ export function UnrealDock({read,bind}) {
           style:{display:'inline-flex',alignItems:'center',gap:7,padding:0,border:0,background:'none',color:colors.text,font:'inherit',fontWeight:500,cursor:'pointer',outlineColor:colors.accent}
         },
           h('span',{'aria-hidden':true,style:{color:colors.accent,fontSize:14}},'▣'),
-          `已选择 ${count} 个${selectionLabel}`,
+          manual?`候选资产 ${count} 个`:`已选择 ${count} 个${selectionLabel}`,
           h('span',{'aria-hidden':true,style:{color:colors.muted,fontSize:10,transform:expanded?'rotate(180deg)':'none',transition:'transform 150ms'}},'▼'))
-        :h('span',{style:{color:colors.muted}},connected?'未选择对象 · 可在内容浏览器或关卡中选择':'连接项目后可查看所选对象')),
+        :h('span',{style:{color:colors.muted}},manual?'候选列表为空':connected?'未选择对象 · 可在内容浏览器或关卡中选择':'连接项目后可查看所选对象'),
+      manual&&count>0?h('button',{type:'button',disabled:!canEditCandidates,onClick:()=>editCandidates('clear'),'aria-label':'清空候选资产',style:{marginLeft:'auto',border:0,background:'none',color:colors.muted,font:'inherit',cursor:canEditCandidates?'pointer':'default'}},'清空'):null),
+    manual?h('div',{style:{color:colors.muted,fontSize:11,lineHeight:1.5,marginTop:3}},connected?'在 UE 内容浏览器中右击资产 → 添加到 DSH。可跨目录追加，同一编辑器的对话共享此列表。':'编辑器已离线，以下候选是此前添加的资产。重新连接后可管理列表。'):null,
     count>0&&expanded?h('ul',{
-      id:'unreal-bridge-assets','aria-label':'已选择的对象',
+      id:'unreal-bridge-assets','aria-label':manual?'候选资产':'已选择的对象',
       style:{boxSizing:'border-box',maxHeight:160,overflowY:'auto',overscrollBehavior:'contain',margin:'8px 0 0',padding:'4px 8px',listStyle:'none',border:`1px solid ${colors.border}`,borderRadius:8,backgroundColor:colors.surface}
     },assets.map((asset,index)=>h('li',{key:`${asset.path}-${index}`,style:{padding:'7px 5px',borderBottom:index<count-1?`1px solid ${colors.border}`:0,overflowWrap:'anywhere'}},
-      h('div',{style:{fontWeight:500,color:colors.text}},`${selectionType(asset)} · ${selectionName(asset)}`),
+      h('div',{style:{display:'flex',alignItems:'center',gap:8,fontWeight:500,color:colors.text}},
+        h('span',{style:{flex:1}},`${selectionType(asset)} · ${selectionName(asset)}`),
+        manual?h('button',{type:'button',disabled:!canEditCandidates,'aria-label':`从候选列表移除 ${selectionName(asset)}`,title:'仅移出候选列表',onClick:()=>editCandidates('remove',[asset.path]),style:{border:0,background:'none',color:colors.muted,font:'inherit',cursor:canEditCandidates?'pointer':'default'}},'移除'):null),
       asset.kind==='component'?h('div',{style:{marginTop:2,color:colors.muted,fontSize:11}},`${asset.source==='blueprint_editor'?'所属蓝图':'所属 Actor'}：${asset.ownerLabel||asset.ownerPath}`):null,
       asset.runtime?h('div',{style:{marginTop:2,color:colors.muted,fontSize:11,lineHeight:1.4}},
         h('div',null,`${runtimeIdentity(asset.runtime)} · ${asset.runtime.status==='paused'?'已暂停':'运行中'}`),
         h('div',null,`世界：${asset.worldPath||asset.runtime.worldId}`)):null,
       h('div',{style:{marginTop:2,color:colors.muted,fontSize:11,lineHeight:1.4}},asset.path)))):null,
+    manual&&live.length>0?h('div',{'aria-label':'实时对象信息',style:{marginTop:8,paddingTop:8,borderTop:`1px solid ${colors.border}`}},
+      h('button',{type:'button','aria-expanded':liveExpanded,'aria-controls':'unreal-bridge-live-selection',onClick:()=>setLiveExpanded(value=>!value),style:{border:0,padding:0,background:'none',color:colors.muted,font:'inherit',cursor:'pointer'}},`实时对象 ${live.length} 个 · 不改变候选资产`),
+      liveExpanded?h('ul',{id:'unreal-bridge-live-selection',style:{maxHeight:160,overflowY:'auto',listStyle:'none',padding:0,margin:'6px 0 0'}},live.map(item=>h('li',{key:item.path,style:{padding:'5px 0',overflowWrap:'anywhere'}},
+        h('div',null,`${selectionType(item)} · ${selectionName(item)}`),
+        item.kind==='component'?h('div',null,`${item.source==='blueprint_editor'?'所属蓝图':'所属 Actor'}：${item.ownerLabel||item.ownerPath}`):null,
+        item.runtime?h('div',null,`${runtimeIdentity(item.runtime)} · ${item.runtime.status==='paused'?'已暂停':'运行中'}`):null,
+        item.runtime?h('div',null,`世界：${item.worldPath||item.runtime.worldId}`):null,
+        h('div',{style:{color:colors.muted,fontSize:11}},item.path)))):null):null,
     snapshots.length>0?h('div',{'aria-label':'运行历史快照',style:{marginTop:8,paddingTop:8,borderTop:`1px solid ${colors.border}`}},
       h('div',{style:{fontWeight:500}},'运行历史快照'),
       h('div',{style:{marginTop:3,color:colors.muted,fontSize:11,lineHeight:1.4}},'以下为按需采集的历史数据，不随运行自动更新；可继续分析已失效或离线目标。'),
@@ -150,6 +181,6 @@ export async function apply(ctx) {
     publishCache(access);
     child.effect?.(()=>()=>{if(cacheAccess===access)publishCache(null);});
     const using=(sessionId,call)=>child.sessions.using(sessionId,{source:'unrealBridge'},async reference=>{const state=reference.binding.session.getSnapshot();if(state.openState!=='open')throw state.openError??new Error('对话尚未就绪');const result=await call();if(!result.ok)throw new Error(result.error.message);return result.value;});
-    child.slots.inject('conversation.input.dock',()=>child.slots.register({name:'conversation.input.dock',id:'unreal-bridge',order:20,inject:sessionId=>({read:()=>using(sessionId,()=>child.remote.unrealBridge.state(sessionId)),bind:editorId=>using(sessionId,()=>child.remote.unrealBridge.bind(sessionId,editorId))})},UnrealDock));
+    child.slots.inject('conversation.input.dock',()=>child.slots.register({name:'conversation.input.dock',id:'unreal-bridge',order:20,inject:sessionId=>({read:()=>using(sessionId,()=>child.remote.unrealBridge.state(sessionId)),bind:editorId=>using(sessionId,()=>child.remote.unrealBridge.bind(sessionId,editorId)),editAssetCandidates:options=>using(sessionId,()=>child.remote.unrealBridge.editAssetCandidates(sessionId,options))})},UnrealDock));
   });
 }

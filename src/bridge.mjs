@@ -9,11 +9,29 @@ import { VERSION, helloSchema, selectionSchema, patchSchema, createSchema, readS
 import { assertSafeMcpCall } from './mcp-policy.mjs';
 import {levelBlueprintSchema} from './protocol.mjs';
 import {materialReadSchema,materialPatchSchema} from './protocol.mjs';
-import {dataTablePatchSchema} from './protocol.mjs';
+import {dataTablePatchSchema,dataTableWriteRowsSchema,dataTableManageRowsSchema,dataTableAddRowsSchema} from './protocol.mjs';
+import {assetCandidatesSchema,assetCandidatesEditSchema} from './protocol.mjs';
 import {shortToolName,describeTools,validateMcpArguments,isReadOnlyMcpCall,mcpFailure,mcpErrorPayload,mcpOperationToolName,requiresMcpOperationContext} from './mcp-contract.mjs';
 import {isUnsafeWriteError} from './write-safety.mjs';
 import {EditorWrites} from './editor-writes.mjs';
 import {rememberMaterialRead,validateMcpOperationContext} from './operation-context.mjs';
+
+function validateDataTableValues(values){
+  // UE's JSON object map can collapse keys differing only by case before
+  // native reflection sees them. Reject these on the lossless host side.
+  let entries=0;
+  const validate=(value,depth=0)=>{
+    if(depth>32||++entries>16384)fail('INVALID_TARGET_ROWS','Row values exceed the nesting or entry limit',{execution:'not_started',retryable:false});
+    if(!value||typeof value!=='object')return;
+    const seen=new Set();
+    for(const [key,child] of Object.entries(value)){
+      const canonical=key.toLowerCase();
+      if(seen.has(canonical))fail('INVALID_TARGET_ROWS','Duplicate field or map key differing only by case: '+key,{execution:'not_started',retryable:false});
+      seen.add(canonical);validate(child,depth+1);
+    }
+  };
+  for(const value of values)validate(value);
+}
 
 export function defaultStateDir() {
   return process.platform==='win32' ? join(process.env.LOCALAPPDATA ?? join(homedir(),'AppData','Local'),'DSHUnrealBridge') : join(process.env.XDG_STATE_HOME ?? join(homedir(),'.local','state'),'dsh-unreal-bridge');
@@ -39,6 +57,7 @@ export class UnrealBridge extends EventEmitter {
     }
     this.editors=new Map(); this.sessions=new Map(); this.pending=new Map(); this.previews=new Map(); this.inflight=new Map(); this.results=new Map(); this.uncertain=new Map(); this.eventVersion=0; this.closed=false;
     this.runtimeSnapshots=new Map(); this.bindingVersions=new Map(); this.writeLocks=new Map();
+    this.assetCandidates=new Map();
     this.editorWrites=new EditorWrites();
     this.token=randomBytes(32).toString('hex'); this.auditChain=Promise.resolve();
   }
@@ -91,7 +110,8 @@ export class UnrealBridge extends EventEmitter {
         } else if(message.type==='event') {
           if(!Number.isSafeInteger(message.sequence)||message.sequence<=editor.lastSequence) return;
           editor.lastSequence=message.sequence;
-          if(message.event==='selection_changed') editor.selection=selectionSchema.parse(message.data).assets.filter(item=>!item.runtime||!this.runtimeUnavailable(editor,item.runtime));
+          if(message.event==='selection_changed') editor.selection=selectionSchema.parse(message.data).assets.filter(item=>(!editor.capabilities.includes('manual_asset_candidates')||item.kind==='actor'||item.kind==='component')&&(!item.runtime||!this.runtimeUnavailable(editor,item.runtime)));
+          else if(message.event==='asset_candidates_changed') this.acceptAssetCandidates(editor,message.data);
           else if(message.event==='runtime_changed') this.runtimeChanged(editor,runtimeChangedSchema.parse(message.data));
           else if(message.event==='blueprint_changed') { if(typeof message.data?.assetPath!=='string'||typeof message.data?.revision!=='string') return; editor.revisions.set(message.data.assetPath,message.data.revision); this.invalidate(editor.editorId,message.data.assetPath); }
           this.changed();
@@ -108,7 +128,24 @@ export class UnrealBridge extends EventEmitter {
   }
   changed(){this.eventVersion++;this.emit('change');}
   list(){return [...this.editors.values()].map(({editorId,project,projectPath,engineVersion,pid,capabilities})=>({editorId,project,projectPath,engineVersion,pid,capabilities}));}
-  state(sessionId){const editorId=this.sessions.get(sessionId);const e=this.editors.get(editorId);const write=this.editorWrites.get(editorId);return {version:this.eventVersion,sessionId,editorId:editorId??null,connected:!!e,editors:this.list(),selection:e?.selection??[],runtime:e?.runtime??null,runtimeSnapshots:this.runtimeHistory(sessionId).snapshots,blueprintSupport:{normalBlueprints:e?.capabilities.includes('read_blueprint')??false,levelBlueprintLookup:e?.capabilities.includes('level_blueprint_lookup')??false,levelBlueprintNativePatch:false},toolSafety:{argumentSchemaValidation:true,nativeTargetValidation:e?.capabilities.includes('mcp_target_validation')??false,nativeOperationContext:e?.capabilities.includes('mcp_operation_context')??false,safePresentation:e?.capabilities.includes('safe_asset_presentation')??false},allowWrites:this.config.allowWrites,requireApproval:this.config.requireApproval,uncertain:this.uncertain.get(sessionId)??(write?.phase==='uncertain'?this.editorWrites.details(write):null),editorWrite:write?this.editorWrites.details(write):null,writeLock:this.writeLocks.get(editorId)??null};}
+  state(sessionId){const editorId=this.sessions.get(sessionId);const e=this.editors.get(editorId);const write=this.editorWrites.get(editorId);const candidates=this.assetCandidates.get(editorId);const manual=e?.capabilities.includes('manual_asset_candidates')??!!candidates;return {version:this.eventVersion,sessionId,editorId:editorId??null,connected:!!e,editors:this.list(),selection:manual?candidates?.assets??[]:e?.selection??[],selectionMode:manual?'manual_assets':'live',assetCandidates:manual?candidates??null:null,liveSelection:manual?e?.selection??[]:[],runtime:e?.runtime??null,runtimeSnapshots:this.runtimeHistory(sessionId).snapshots,blueprintSupport:{normalBlueprints:e?.capabilities.includes('read_blueprint')??false,levelBlueprintLookup:e?.capabilities.includes('level_blueprint_lookup')??false,levelBlueprintNativePatch:false},toolSafety:{argumentSchemaValidation:true,nativeTargetValidation:e?.capabilities.includes('mcp_target_validation')??false,nativeOperationContext:e?.capabilities.includes('mcp_operation_context')??false,safePresentation:e?.capabilities.includes('safe_asset_presentation')??false},allowWrites:this.config.allowWrites,requireApproval:this.config.requireApproval,uncertain:this.uncertain.get(sessionId)??(write?.phase==='uncertain'?this.editorWrites.details(write):null),editorWrite:write?this.editorWrites.details(write):null,writeLock:this.writeLocks.get(editorId)??null};}
+  acceptAssetCandidates(editor,value){
+    if(!editor.capabilities.includes('manual_asset_candidates'))fail('INVALID_REQUEST','Editor did not advertise manual asset candidates');
+    const snapshot=assetCandidatesSchema.parse(value),previous=this.assetCandidates.get(editor.editorId);
+    const paths=new Set(snapshot.assets.map(item=>item.path.toLowerCase()));
+    if(paths.size!==snapshot.assets.length)fail('INVALID_REQUEST','Duplicate candidate asset paths');
+    if(!previous||snapshot.revision>previous.revision)this.assetCandidates.set(editor.editorId,snapshot);
+  }
+  async editAssetCandidates(sessionId,args){
+    const {editorId,...params}=assetCandidatesEditSchema.parse(args),editor=this.target(sessionId);
+    if(editor.editorId!==editorId)fail('INSTANCE_CHANGED','绑定的编辑器已变化，请查看当前候选列表后重试。');
+    if(!editor.capabilities.includes('manual_asset_candidates'))fail('CANDIDATES_UNAVAILABLE','请更新 UE 插件后使用手动候选列表。');
+    const bindingVersion=this.bindingVersions.get(sessionId);
+    const snapshot=await this.request(editor,'asset_candidates_edit',params);
+    if(this.target(sessionId)!==editor||this.bindingVersions.get(sessionId)!==bindingVersion)fail('INSTANCE_CHANGED','编辑器绑定已变化。');
+    this.acceptAssetCandidates(editor,snapshot);this.changed();
+    return this.state(sessionId);
+  }
   bind(sessionId,editorId){if(editorId!==null&&!this.editors.has(editorId))fail('INSTANCE_NOT_FOUND','Editor is not connected'); if(this.inflight.has(sessionId))fail('BUSY','A request is still executing for this conversation');editorId===null?this.sessions.delete(sessionId):this.sessions.set(sessionId,editorId);this.bindingVersions.set(sessionId,(this.bindingVersions.get(sessionId)??0)+1);this.changed();return this.state(sessionId);}
   target(sessionId){const editorId=this.sessions.get(sessionId);if(!editorId)fail('NOT_BOUND','Select an Unreal Editor instance for this conversation first');const editor=this.editors.get(editorId);if(!editor)fail('DISCONNECTED','The bound editor is offline; reconnect it or choose another instance');return editor;}
   mcpTarget(sessionId){const editor=this.target(sessionId);if(!editor.capabilities.includes('mcp_tools'))fail('MCP_UNAVAILABLE','This editor does not expose UE MCP tools; enable ModelContextProtocol and update DSHUnrealBridge');return editor;}
@@ -278,10 +315,25 @@ export class UnrealBridge extends EventEmitter {
     return this.mutate(sessionId,'mcp_call_tool',call,requestId,signal,{mcpReadOnly,operationToken});
   }
   async mcpCallToolset(sessionId,args,signal,admit){const {toolsetName,toolName,arguments:toolArgs,requestId}=mcpToolsetCallSchema.parse(args);return this.mcpCall(sessionId,{name:'call_tool',arguments:{toolset_name:toolsetName,tool_name:toolName,arguments:toolArgs},requestId},signal,admit);}
+  async addDataTableRows(sessionId,args,signal){return this.writeDataTableRows(sessionId,{...dataTableAddRowsSchema.parse(args),mode:'add'},signal);}
+  async manageDataTableRows(sessionId,args,signal){
+    const {requestId,...params}=dataTableManageRowsSchema.parse(args),editor=this.target(sessionId);
+    if(!editor.capabilities.includes('data_table_manage_rows'))fail('DATA_TABLE_MANAGE_ROWS_UNAVAILABLE','Update the UE bridge plugin for atomic DataTable rename/delete/duplicate/clear operations.',{execution:'not_started',retryable:false});
+    if(params.dryRun){
+      const bindingVersion=this.bindingVersions.get(sessionId);
+      const result=await this.request(editor,'data_table_manage_rows',params,{id:requestId,signal});
+      if(this.target(sessionId)!==editor||this.bindingVersions.get(sessionId)!==bindingVersion)fail('INSTANCE_CHANGED','Editor binding changed during DataTable preview');
+      if(result?.verified!==true||result?.dryRun!==true)fail('DATA_TABLE_PREVIEW_INVALID','Editor did not return a verified DataTable preview',{execution:'completed',retryable:false});
+      return result;
+    }
+    return this.mutate(sessionId,'data_table_manage_rows',params,requestId,signal);
+  }
   async copyDataTableProperty(sessionId,args,signal){const {requestId,...params}=dataTableCopySchema.parse(args);if(!this.target(sessionId).capabilities.includes('data_table_copy_property'))fail('DATA_TABLE_COPY_UNAVAILABLE','Update the UE bridge plugin to copy DataTable properties safely; do not fall back to set_rows or desktop input',{retryable:false});return this.mutate(sessionId,'data_table_copy_property',params,requestId,signal);}
   async patchDataTable(sessionId,args,signal){
     const {requestId,...params}=dataTablePatchSchema.parse(args),editor=this.target(sessionId);
+    validateDataTableValues(params.operations.filter(op=>op.op==='set').map(op=>op.value));
     if(!editor.capabilities.includes('data_table_patch'))fail('DATA_TABLE_PATCH_UNAVAILABLE','Update the UE bridge plugin for nested DataTable edits. Stop this operation; do not retry set_rows or rebuild the plugin during an asset-edit task.',{execution:'not_started',retryable:false});
+    if(params.operations.some(op=>op.op==='remove'||(op.op==='set'&&(op.value===null||typeof op.value==='object')))&&!editor.capabilities.includes('data_table_patch_containers'))fail('DATA_TABLE_PATCH_UNAVAILABLE','Update the UE bridge plugin for DataTable container edits.',{execution:'not_started',retryable:false});
     if(params.dryRun){
       const bindingVersion=this.bindingVersions.get(sessionId);
       const result=await this.request(editor,'data_table_patch',params,{id:requestId,signal});
@@ -290,6 +342,20 @@ export class UnrealBridge extends EventEmitter {
       return result;
     }
     return this.mutate(sessionId,'data_table_patch',params,requestId,signal);
+  }
+  async writeDataTableRows(sessionId,args,signal){
+    const {requestId,...params}=dataTableWriteRowsSchema.parse(args),editor=this.target(sessionId);
+    if(!editor.capabilities.includes('data_table_write_rows'))fail('DATA_TABLE_WRITE_ROWS_UNAVAILABLE','Update the UE bridge plugin to write individual DataTable rows; do not use the lossy MCP set_rows/add_rows tools.',{execution:'not_started',retryable:false});
+    if(params.mode==='update'&&params.rows.some(row=>Object.keys(row.values).length===0))fail('INVALID_TARGET_ROWS','Each updated row must supply at least one field value',{execution:'not_started',retryable:false});
+    validateDataTableValues(params.rows.map(row=>row.values));
+    if(params.dryRun){
+      const bindingVersion=this.bindingVersions.get(sessionId);
+      const result=await this.request(editor,'data_table_write_rows',params,{id:requestId,signal});
+      if(this.target(sessionId)!==editor||this.bindingVersions.get(sessionId)!==bindingVersion)fail('INSTANCE_CHANGED','Editor binding changed during DataTable preview');
+      if(result?.verified!==true||result?.dryRun!==true)fail('DATA_TABLE_PREVIEW_INVALID','Editor did not return a verified DataTable preview',{execution:'completed',retryable:false});
+      return result;
+    }
+    return this.mutate(sessionId,'data_table_write_rows',params,requestId,signal);
   }
   async materialRead(sessionId,args,signal){
     const params=materialReadSchema.parse(args),editor=this.target(sessionId),bindingVersion=this.bindingVersions.get(sessionId);
@@ -367,7 +433,7 @@ export class UnrealBridge extends EventEmitter {
       const wireParams=method==='mcp_call_tool'&&options.operationToken?{...params,operationToken:options.operationToken}:params;
       const result=await this.request(editor,method,wireParams,{id:requestId,signal,timeoutMs});
       if(method==='mcp_call_tool'&&mcpErrorPayload(result))throw mcpFailure(result,requestId,readOnly);
-      if(['data_table_copy_property','data_table_patch'].includes(method)&&(result?.verified!==true||(method==='data_table_patch'&&result?.dryRun!==false)))fail('DATA_TABLE_ROLLBACK_FAILED','The DataTable copy did not return a verified result; stop writes and inspect the editor',{retryable:false,rollback:'failed',requestId});
+      if(['data_table_copy_property','data_table_patch','data_table_write_rows','data_table_manage_rows'].includes(method)&&(result?.verified!==true||(['data_table_patch','data_table_write_rows','data_table_manage_rows'].includes(method)&&result?.dryRun!==false)))fail('DATA_TABLE_ROLLBACK_FAILED','The DataTable copy did not return a verified result; stop writes and inspect the editor',{retryable:false,rollback:'failed',requestId});
       if(method==='material_patch'&&(result?.verified!==true||result?.dryRun!==false))fail('ROLLBACK_FAILED','The material write did not return a verified commit result; the editor remains protected',{retryable:false,rollback:'failed',requestId});
       this.cacheResult(key,{hash,result});
       await this.audit({phase:'completed',sessionId,editorId:editor.editorId,requestId,method,revision:result?.revision}).catch(e=>this.emit('diagnostic',`Audit completion failed: ${e.message}`));
@@ -406,7 +472,7 @@ export class UnrealBridge extends EventEmitter {
         :typeof response.error?.code==='string'&&typeof response.error?.message==='string');
       if(!valid)fail('INVALID_REQUEST_STATUS','The completed write response is malformed; the editor remains protected');
       let error=result.response.ok?null:new BridgeError(result.response.error.code,result.response.error.message,result.response.error.details);
-      if(!error&&['data_table_copy_property','data_table_patch'].includes(lease.method)&&(result.response.result?.verified!==true||(lease.method==='data_table_patch'&&result.response.result?.dryRun!==false)))error=new BridgeError('DATA_TABLE_ROLLBACK_FAILED','The recovered copy result is unverified',{rollback:'failed',retryable:false,requestId});
+      if(!error&&['data_table_copy_property','data_table_patch','data_table_write_rows','data_table_manage_rows'].includes(lease.method)&&(result.response.result?.verified!==true||(['data_table_patch','data_table_write_rows','data_table_manage_rows'].includes(lease.method)&&result.response.result?.dryRun!==false)))error=new BridgeError('DATA_TABLE_ROLLBACK_FAILED','The recovered copy result is unverified',{rollback:'failed',retryable:false,requestId});
       if(!error&&lease.method==='material_patch'&&(result.response.result?.verified!==true||result.response.result?.dryRun!==false))error=new BridgeError('ROLLBACK_FAILED','The recovered material commit is unverified',{rollback:'failed',retryable:false,requestId});
       if(!error&&lease.method==='mcp_call_tool'&&mcpErrorPayload(result.response.result))error=mcpFailure(result.response.result,requestId);
       if(error)this.lockUnsafeWrite(editor.editorId,error,lease);

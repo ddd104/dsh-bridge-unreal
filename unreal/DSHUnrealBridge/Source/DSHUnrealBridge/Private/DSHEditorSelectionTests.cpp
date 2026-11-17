@@ -48,8 +48,7 @@ bool FDSHLevelSelection::RunTest(const FString&)
     if (TestNotNull(TEXT("Blueprint fixture exists"), Blueprint))
     {
         Browser.GetOnAssetSelectionChanged().Broadcast({FAssetData(Blueprint)}, true); Tracker.Tick();
-        TestEqual(TEXT("Content selection reaches tracker"), Tracker.GetSelection().Num(), 1);
-        TestEqual(TEXT("Content asset path"), Tracker.GetSelection()[0]->AsObject()->GetStringField(TEXT("path")), Blueprint->GetPathName());
+        TestTrue(TEXT("Browsing content does not attach assets"), Tracker.GetSelection().IsEmpty());
         // A single object notification must work without NoteSelectionChange.
         Actors->Select(Actor); TestTrue(TEXT("Actor notification changes selection"), Tracker.Tick()); Check(TEXT("actor"), Actor);
         TestEqual(TEXT("Actor display label"), Tracker.GetSelection()[0]->AsObject()->GetStringField(TEXT("label")), Actor->GetActorLabel());
@@ -78,7 +77,7 @@ bool FDSHLevelSelection::RunTest(const FString&)
             Reconnected.Stop(); Components->DeselectAll(); Actors->DeselectAll(); World->DestroyActor(BlueprintActor);
         }
         Browser.GetOnAssetSelectionChanged().Broadcast({FAssetData(Blueprint)}, true); Tracker.Tick();
-        TestEqual(TEXT("Returning to content replaces level context"), Tracker.GetSelection()[0]->AsObject()->GetStringField(TEXT("path")), Blueprint->GetPathName());
+        TestTrue(TEXT("Browsing content only clears live level context"), Tracker.GetSelection().IsEmpty());
         Actors->NoteSelectionChanged(); Tracker.Tick();
         TestTrue(TEXT("Empty level selection clears asset context"), Tracker.GetSelection().IsEmpty());
     }

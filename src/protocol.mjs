@@ -29,10 +29,31 @@ export const mcpCallSchema = z.object({name:mcpToolName,arguments:mcpArguments.d
 export const mcpToolsetCallSchema = z.object({toolsetName:mcpToolName,toolName:mcpToolName,arguments:mcpArguments.default({}),requestId:z.string().uuid()}).strict();
 export const dataTableCopySchema = z.object({assetPath,sourceRow:z.string().min(1).max(1024),propertyName:z.string().min(1).max(160).regex(/^[A-Za-z_][A-Za-z0-9_]*$/),targetRows:z.array(z.string().min(1).max(1024)).min(1).max(4096).optional(),requestId:z.string().uuid()}).strict();
 const dataTablePath=z.array(z.string().min(1).max(160)).min(1).max(32).describe('Path segments: reflected field names (or their get_rows JSON spelling), existing map keys including enum names, and decimal array indices. Each key is one segment even if it contains dots.');
+export const dataTableWriteRowsSchema=z.object({
+  assetPath,
+  mode:z.enum(['update','add','upsert']).default('update'),
+  rows:z.array(z.object({rowName:z.string().min(1).max(1023),values:z.record(z.string().min(1).max(160),z.json())}).strict()).min(1).max(4096).describe('Each row supplies its own field values. Structs and maps merge specified fields/keys; arrays replace the specified array. Unspecified values remain unchanged; new rows start with struct defaults.'),
+  dryRun:z.boolean().default(true),requestId:z.string().uuid(),
+}).strict();
+const dataTableRowName=z.string().min(1).max(1023);
+const dataTableMutationBase={assetPath,dryRun:z.boolean().default(true),requestId:z.string().uuid()};
+export const dataTableAddRowsSchema=z.object({...dataTableMutationBase,rows:z.array(z.object({rowName:dataTableRowName,values:z.record(z.string().min(1).max(160),z.json()).default({})}).strict()).min(1).max(4096)}).strict();
+export const dataTableRenameRowsSchema=z.object({...dataTableMutationBase,renames:z.array(z.object({rowName:dataTableRowName,newRowName:dataTableRowName}).strict()).min(1).max(4096)}).strict();
+export const dataTableRenameRowSchema=z.object({...dataTableMutationBase,rowName:dataTableRowName,newRowName:dataTableRowName}).strict();
+export const dataTableDeleteRowsSchema=z.object({...dataTableMutationBase,rows:z.array(dataTableRowName).min(1).max(4096)}).strict();
+export const dataTableDuplicateRowsSchema=z.object({...dataTableMutationBase,copies:z.array(z.object({sourceRow:dataTableRowName,newRowName:dataTableRowName}).strict()).min(1).max(4096)}).strict();
+export const dataTableClearSchema=z.object(dataTableMutationBase).strict();
+export const dataTableManageRowsSchema=z.discriminatedUnion('action',[
+  dataTableRenameRowsSchema.extend({action:z.literal('rename')}),
+  dataTableDeleteRowsSchema.extend({action:z.literal('delete')}),
+  dataTableDuplicateRowsSchema.extend({action:z.literal('duplicate')}),
+  dataTableClearSchema.extend({action:z.literal('clear')}),
+]);
 export const dataTablePatchSchema=z.object({
   assetPath,rows:z.array(z.string().min(1).max(1024)).min(1).max(4096).optional().describe('Existing rows to modify. Omit for every row.'),
   operations:z.array(z.discriminatedUnion('op',[
-    z.object({op:z.literal('set'),path:dataTablePath,value:z.union([z.string().max(8192),z.number(),z.boolean()])}).strict(),
+    z.object({op:z.literal('set'),path:dataTablePath,value:z.json()}).strict(),
+    z.object({op:z.literal('remove'),path:dataTablePath.describe('Path to an existing map entry or dynamic array element to delete. Array indices are evaluated in operation order.')}).strict(),
     z.object({op:z.literal('copy'),path:dataTablePath,sourcePath:dataTablePath,sourceRow:z.string().min(1).max(1024).optional().describe('Omit to copy from the same row. All sources use original values before this batch.')}).strict(),
   ])).min(1).max(64),
   dryRun:z.boolean().default(true),requestId:z.string().uuid(),
@@ -95,6 +116,12 @@ export const runtimeHistorySchema=z.object({snapshotId:z.string().uuid().optiona
 export const runtimeSnapshotResultSchema=z.object({target:runtimeMetadataSchema,path:z.string().min(1).max(1024),class:z.string().min(1).max(1024),worldPath:z.string().max(1024),name:z.string().max(1024),label:z.string().max(1024),kind:z.enum(['actor','component']),blueprintPath:z.string().max(1024).optional(),ownerBlueprintPath:z.string().max(1024).optional(),capturedAt:z.iso.datetime({offset:true}),sampledFrame:z.string().min(1).max(80),paused:z.boolean(),runtimeEvidence:z.literal(true),object:z.record(z.string(),z.json()),components:z.array(z.record(z.string(),z.json())).max(32)}).catchall(z.json());
 export const helloSchema = z.object({type:z.literal('hello'), protocol:z.literal(VERSION), editorId:id, project:z.string().min(1).max(512), projectPath:z.string().max(2048), engineVersion:z.string().max(80), pid:z.number().int().positive(), capabilities:z.array(id).max(64)}).strict();
 const selectionBase = {path:z.string().min(1).max(1024), class:z.string().min(1).max(1024)};
+export const assetCandidatesSchema=z.object({revision:z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),assets:z.array(z.object({...selectionBase,kind:z.literal('asset')}).strict()).max(256)}).strict();
+const candidateEditBase={editorId:id,revision:z.number().int().min(0).max(Number.MAX_SAFE_INTEGER)};
+export const assetCandidatesEditSchema=z.discriminatedUnion('action',[
+  z.object({...candidateEditBase,action:z.literal('remove'),paths:z.array(z.string().min(1).max(1024)).min(1).max(256)}).strict(),
+  z.object({...candidateEditBase,action:z.literal('clear')}).strict(),
+]);
 const levelSelection = {...selectionBase, name:z.string().max(1024), label:z.string().max(1024), worldPath:z.string().max(1024), blueprintPath:z.string().max(1024).optional()};
 export const selectionSchema = z.object({assets:z.array(z.union([
   z.object({...selectionBase, kind:z.literal('asset').optional()}).strict(),

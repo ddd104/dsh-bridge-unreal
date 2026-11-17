@@ -37,7 +37,8 @@ function checkTarget(name, args, allowDesktopInput) {
   // remove_rows is a native row removal; create/import_file do not take this
   // lossy path, so these methods remain available.
   if (DATA_TABLE.test(name) && LOSSY_DATA_TABLE_METHODS.some(pattern => pattern.test(name))) {
-    blocked('lossy_json_roundtrip', 'This DataTable tool can lose unrelated data. Do not retry. Use unreal_data_table_patch for row/nested field edits or unreal_data_table_copy_property for whole-column copies. If the required capability is missing, stop this operation and report the plugin update requirement; do not rebuild the bridge as part of an asset edit.', 'unreal_data_table_patch');
+    const recommended=method(['rename','rows?']).test(name)?'unreal_data_table_rename_rows':method(['add','rows?']).test(name)?'unreal_data_table_add_rows':'unreal_data_table_write_rows';
+    blocked('lossy_json_roundtrip', 'This legacy DataTable implementation can lose unrelated data. Do not retry it. Use '+recommended+' for this operation. Native row tools also support delete_rows, duplicate_rows and clear; unreal_data_table_patch edits nested values and removes map/array entries. If the required capability is missing, report the plugin update requirement; do not rebuild the bridge during an asset-edit task.', recommended);
   }
   if (!SLATE.test(name) || allowDesktopInput) return;
   if (method(['windows']).test(name)) {

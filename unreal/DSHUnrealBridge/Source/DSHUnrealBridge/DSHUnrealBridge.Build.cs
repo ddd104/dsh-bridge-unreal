@@ -5,6 +5,7 @@ public class DSHUnrealBridge : ModuleRules
     {
         PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
         PrivateDependencyModuleNames.Add("JsonUtilities");
-        PrivateDependencyModuleNames.AddRange(new[] { "Core", "CoreUObject", "Engine", "UnrealEd", "TypedElementRuntime", "Json", "WebSockets", "ContentBrowser", "AssetRegistry", "Kismet", "KismetCompiler", "BlueprintGraph", "GraphEditor", "SubobjectEditor", "SubobjectDataInterface", "MaterialEditor", "Slate", "SlateCore", "DeveloperSettings", "RenderCore", "RHI", "ImageCore", "ToolsetRegistry", "DSHUnrealBridgeMCP", "DSHUnrealBridgeKnowledge" });
+        PrivateDependencyModuleNames.Add("ContentBrowserData");
+        PrivateDependencyModuleNames.AddRange(new[] { "Core", "CoreUObject", "Engine", "UnrealEd", "TypedElementRuntime", "Json", "WebSockets", "ContentBrowser", "ToolMenus", "AssetRegistry", "Kismet", "KismetCompiler", "BlueprintGraph", "GraphEditor", "SubobjectEditor", "SubobjectDataInterface", "MaterialEditor", "Slate", "SlateCore", "DeveloperSettings", "RenderCore", "RHI", "ImageCore", "ToolsetRegistry", "DSHUnrealBridgeMCP", "DSHUnrealBridgeKnowledge" });
     }
 }

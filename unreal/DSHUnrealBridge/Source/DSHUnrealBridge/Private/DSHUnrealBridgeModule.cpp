@@ -1,6 +1,7 @@
 #include "Modules/ModuleManager.h"
 #include "DSHBlueprintOps.h"
 #include "DSHDataTableOps.h"
+#include "DSHAssetCandidates.h"
 #include "DSHMaterialOps.h"
 #include "DSHLevelBlueprintLookup.h"
 #include "DSHAssetPresentation.h"
@@ -169,6 +170,7 @@ public:
         RuntimeInspector.Start();
         EditorSelection.SetRuntimeInspector(&RuntimeInspector);
         EditorSelection.Start();
+        AssetCandidates.Start([this]() { Event(TEXT("asset_candidates_changed"), AssetCandidates.Snapshot()); });
         TransactedHandle=FCoreUObjectDelegates::OnObjectTransacted.AddSP(AsShared(),&FDSHConnection::ObjectTransacted);
         PropertyHandle=FCoreUObjectDelegates::OnObjectPropertyChanged.AddSP(AsShared(),&FDSHConnection::PropertyChanged);
         TickHandle=FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateSP(AsShared(),&FDSHConnection::Tick),0.1f);
@@ -182,6 +184,7 @@ public:
         PendingKnowledge.Reset();
         FTSTicker::GetCoreTicker().RemoveTicker(TickHandle);
         EditorSelection.Stop();
+        AssetCandidates.Stop();
         RuntimeInspector.Stop();
         FCoreUObjectDelegates::OnObjectTransacted.Remove(TransactedHandle);FCoreUObjectDelegates::OnObjectPropertyChanged.Remove(PropertyHandle);
         if(Socket){Socket->OnConnected().Clear();Socket->OnConnectionError().Clear();Socket->OnClosed().Clear();Socket->OnMessage().Clear();Socket->Close();Socket.Reset();}
@@ -195,6 +198,7 @@ private:
     FTSTicker::FDelegateHandle TickHandle;
     FDelegateHandle TransactedHandle,PropertyHandle;
     FDSHEditorSelection EditorSelection;
+    FDSHAssetCandidates AssetCandidates;
     FDSHRuntimeInspector RuntimeInspector;
     uint64 Generation=0;
     struct FIncoming { uint64 Generation; FString Message; };
@@ -250,7 +254,7 @@ private:
     void Hello()
     {
         bConnecting=false;Sequence=0;auto O=MakeShared<FJsonObject>();O->SetStringField(TEXT("type"),TEXT("hello"));O->SetNumberField(TEXT("protocol"),1);O->SetStringField(TEXT("editorId"),EditorId);O->SetStringField(TEXT("project"),FApp::GetProjectName());O->SetStringField(TEXT("projectPath"),FPaths::ConvertRelativePathToFull(FPaths::GetProjectFilePath()));O->SetStringField(TEXT("engineVersion"),FEngineVersion::Current().ToString());O->SetNumberField(TEXT("pid"),FPlatformProcess::GetCurrentProcessId());
-        TArray<TSharedPtr<FJsonValue>> Caps;for(const TCHAR* Name:{TEXT("selection"),TEXT("level_selection"),TEXT("blueprint_component_selection"),TEXT("runtime_inspection"),TEXT("read_blueprint"),TEXT("preview_patch"),TEXT("apply_patch"),TEXT("create_blueprint"),TEXT("undo"),TEXT("save"),TEXT("request_status"),TEXT("mcp_tools"),TEXT("mcp_target_validation"),TEXT("mcp_operation_context"),TEXT("safe_asset_presentation"),TEXT("project_knowledge"),TEXT("focus_asset"),TEXT("custom_event_patch"),TEXT("visual_capture"),TEXT("data_table_copy_property"),TEXT("data_table_patch"),TEXT("automatic_graph_layout"),TEXT("level_blueprint_lookup"),TEXT("material_graph_patch")})Caps.Add(MakeShared<FJsonValueString>(Name));O->SetArrayField(TEXT("capabilities"),Caps);Send(O);
+        TArray<TSharedPtr<FJsonValue>> Caps;for(const TCHAR* Name:{TEXT("selection"),TEXT("manual_asset_candidates"),TEXT("level_selection"),TEXT("blueprint_component_selection"),TEXT("runtime_inspection"),TEXT("read_blueprint"),TEXT("preview_patch"),TEXT("apply_patch"),TEXT("create_blueprint"),TEXT("undo"),TEXT("save"),TEXT("request_status"),TEXT("mcp_tools"),TEXT("mcp_target_validation"),TEXT("mcp_operation_context"),TEXT("safe_asset_presentation"),TEXT("project_knowledge"),TEXT("focus_asset"),TEXT("custom_event_patch"),TEXT("visual_capture"),TEXT("data_table_copy_property"),TEXT("data_table_patch"),TEXT("data_table_write_rows"),TEXT("data_table_manage_rows"),TEXT("data_table_patch_containers"),TEXT("automatic_graph_layout"),TEXT("level_blueprint_lookup"),TEXT("material_graph_patch")})Caps.Add(MakeShared<FJsonValueString>(Name));O->SetArrayField(TEXT("capabilities"),Caps);Send(O);
     }
     TSharedPtr<FJsonObject> Error(const FString& Id,const FString& Code,const FString& Message,const TSharedPtr<FJsonObject>& Details=nullptr)
     {
@@ -328,6 +332,14 @@ private:
                 :Error(Id,TEXT("IN_PROGRESS"),TEXT("This request is still running; query request status")));
             return;
         }
+        if(Method==TEXT("asset_candidates_edit"))
+        {
+            FString Code, MessageText;
+            const auto Result=AssetCandidates.Edit(Params,Code,MessageText);
+            auto Response=Result?MakeShared<FJsonObject>():Error(Id,Code,MessageText);
+            if(Result){Response->SetStringField(TEXT("type"),TEXT("response"));Response->SetStringField(TEXT("id"),Id);Response->SetBoolField(TEXT("ok"),true);Response->SetObjectField(TEXT("result"),Result);}
+            Send(Response);return;
+        }
         if(Method==TEXT("mcp_operation_context"))
         {
             const TSharedPtr<FJsonObject>* Arguments=nullptr;
@@ -394,8 +406,8 @@ private:
         }
         const bool bKnowledgeWrite=FProjectKnowledgeService::IsWriteTool(KnowledgeTool);
         bool bMaterialDryRun=true;
-        if(Method==TEXT("material_patch")||Method==TEXT("data_table_patch"))Params->TryGetBoolField(TEXT("dryRun"),bMaterialDryRun);
-        const bool bWrite=Method==TEXT("apply_patch")||Method==TEXT("create_blueprint")||Method==TEXT("undo")||Method==TEXT("save")||Method==TEXT("mcp_call_tool")||Method==TEXT("data_table_copy_property")||((Method==TEXT("material_patch")||Method==TEXT("data_table_patch"))&&!bMaterialDryRun)||bKnowledgeWrite;
+        if(Method==TEXT("material_patch")||Method==TEXT("data_table_patch")||Method==TEXT("data_table_write_rows")||Method==TEXT("data_table_manage_rows"))Params->TryGetBoolField(TEXT("dryRun"),bMaterialDryRun);
+        const bool bWrite=Method==TEXT("apply_patch")||Method==TEXT("create_blueprint")||Method==TEXT("undo")||Method==TEXT("save")||Method==TEXT("mcp_call_tool")||Method==TEXT("data_table_copy_property")||((Method==TEXT("material_patch")||Method==TEXT("data_table_patch")||Method==TEXT("data_table_write_rows")||Method==TEXT("data_table_manage_rows"))&&!bMaterialDryRun)||bKnowledgeWrite;
         const bool bMutation=bWrite&&(Method!=TEXT("mcp_call_tool")||!IsAuditedMcpRead(Params));
         if(bWrite)
         {
@@ -486,6 +498,8 @@ private:
         }
         FString Code,MessageText;FDSHAssetViewHint ViewHint;TSharedPtr<FJsonObject> ErrorDetails;
         auto Result=Method==TEXT("data_table_copy_property")?FDSHDataTableOps::CopyProperty(Params,Code,MessageText,ErrorDetails)
+            :Method==TEXT("data_table_write_rows")?FDSHDataTableOps::WriteRows(Params,Code,MessageText,ErrorDetails)
+            :Method==TEXT("data_table_manage_rows")?FDSHDataTableOps::ManageRows(Params,Code,MessageText,ErrorDetails)
             :Method==TEXT("data_table_patch")?FDSHDataTableOps::Patch(Params,Code,MessageText,ErrorDetails)
             :Method==TEXT("material_read")||Method==TEXT("material_patch")?FDSHMaterialOps::Execute(Method,Params,Code,MessageText,ErrorDetails,&ViewHint)
             :Operations.Execute(Method,Params,Code,MessageText,&ViewHint,&ErrorDetails);TSharedPtr<FJsonObject> Response;
@@ -518,7 +532,7 @@ private:
             if(Message==TEXT("__connected")){Hello();continue;}
             if(Message==TEXT("__disconnected")){bConnecting=false;bAuthenticated=false;continue;}
             const auto O=Decode(Message);if(!O)continue;const FString Type=Field(O,TEXT("type"));
-            if(Type==TEXT("hello_ack")){bAuthenticated=true;Event(TEXT("runtime_changed"),RuntimeInspector.GetEvent());SendSelection();continue;}
+            if(Type==TEXT("hello_ack")){bAuthenticated=true;Event(TEXT("runtime_changed"),RuntimeInspector.GetEvent());SendSelection();Event(TEXT("asset_candidates_changed"),AssetCandidates.Snapshot());continue;}
             if(bAuthenticated&&Type==TEXT("request"))Request(O);
         }
         Presentation.Tick();

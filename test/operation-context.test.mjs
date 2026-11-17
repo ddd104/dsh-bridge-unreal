@@ -35,6 +35,17 @@ test('dispatch wrappers and qualified leaf aliases cannot create new problem fam
 
 test('DataTable and save package/object aliases are canonical',()=>{
   const native=context('unreal_data_table_copy_property',{assetPath:'/Game/Table'});
+  const preview=context('unreal_data_table_write_rows',{assetPath:'/Game/Table.Table'});
+  const write=context('unreal_data_table_write_rows',{assetPath:'/Game/Table',dryRun:false});
+  assert.deepEqual(identity(preview),identity(native));
+  assert.deepEqual(identity(write),identity(native));
+  assert.equal(preview.kind,'preview');assert.equal(write.kind,'write');
+  for(const name of ['add_rows','rename_row','rename_rows','delete_rows','duplicate_rows','clear']){
+    const tool='unreal_data_table_'+name;
+    assert.deepEqual(identity(context(tool,{assetPath:'/Game/Table'})),identity(native));
+    assert.equal(context(tool,{assetPath:'/Game/Table'}).kind,'preview');
+    assert.equal(context(tool,{assetPath:'/Game/Table',dryRun:false}).kind,'write');
+  }
   assert.deepEqual(identity(native),identity(call(DATA_TABLE,'set_row_property',{data_table:{refPath:'/Game/Table.Table'}})));
   assert.deepEqual(identity(context('unreal_save',{assetPath:'/Game/BP_Test'})),identity(context('unreal_save',{assetPath:'/Game/BP_Test.BP_Test'})));
 });

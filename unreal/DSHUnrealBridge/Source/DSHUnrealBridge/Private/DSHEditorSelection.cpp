@@ -133,15 +133,9 @@ void FDSHEditorSelection::TypedLevelChanged(const UTypedElementSelectionSet*)
 void FDSHEditorSelection::AssetsChanged(const TArray<FAssetData>& Assets, bool bPrimary)
 {
     if (!bPrimary) return;
+    // Browsing clears only the live scene/component context. Content assets are
+    // attached explicitly through the context menu, never by selection events.
     PendingAssets.Reset();
-    for (const FAssetData& Asset : Assets)
-    {
-        if (PendingAssets.Num() >= 256) break;
-        auto Entry = MakeShared<FJsonObject>();
-        Entry->SetStringField(TEXT("path"), Asset.GetObjectPathString());
-        Entry->SetStringField(TEXT("class"), Asset.AssetClassPath.ToString());
-        PendingAssets.Add(MakeShared<FJsonValueObject>(Entry));
-    }
     Source = ESource::Assets;
     bPending = true;
 }
@@ -188,14 +182,7 @@ void FDSHEditorSelection::OnBlueprintSelectionUpdated(IAssetEditorInstance* Edit
         AddBlueprint(Component, TEXT("blueprintPath"), Entry);
         PendingBlueprint.Add(MakeShared<FJsonValueObject>(Entry));
     }
-    // The actor root and other Blueprint contexts identify the asset itself.
-    if (PendingBlueprint.IsEmpty())
-    {
-        auto Entry = MakeShared<FJsonObject>();
-        Entry->SetStringField(TEXT("path"), Blueprint->GetPathName());
-        Entry->SetStringField(TEXT("class"), Blueprint->GetClass()->GetPathName());
-        PendingBlueprint.Add(MakeShared<FJsonValueObject>(Entry));
-    }
+    // Opening a Blueprint or selecting its root must not attach that asset.
     SelectedBlueprint = Blueprint;
     Source = ESource::Blueprint;
     bPending = true;

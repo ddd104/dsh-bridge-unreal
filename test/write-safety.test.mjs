@@ -32,6 +32,110 @@ const copy=()=>({assetPath:'/Game/DT_Test',sourceRow:'Predestrian',propertyName:
 const copied={verified:true,targetCount:45,changedRows:45,unchangedRows:0,saved:false};
 
 const patch=()=>({assetPath:'/Game/DT_Test',operations:[{op:'copy',path:['colorTypeMaterialParams','Green'],sourcePath:['ColorTypeMaterialParams','Blue']}],requestId:randomUUID()});
+const writeRows=()=>({assetPath:'/Game/DT_Test',mode:'upsert',rows:[{rowName:'Car',values:{Label:'Sedan'}},{rowName:'NewBus',values:{Label:'Coach',FloatParameters:{Speed:50}}}],requestId:randomUUID()});
+test('DataTable individual rows preview read-only and commit once with distinct values',async t=>{
+  const bridge=await fixture(t,{allowWrites:false});
+  const calls=await editor(bridge,m=>({ok:true,result:{...copied,dryRun:m.params.dryRun}}),['data_table_write_rows']);
+  assert.equal((await bridge.writeDataTableRows('chat',writeRows())).dryRun,true);
+  const args={...writeRows(),dryRun:false};
+  await assert.rejects(bridge.writeDataTableRows('chat',args),{code:'READ_ONLY'});
+  bridge.config.allowWrites=true;
+  assert.equal((await bridge.writeDataTableRows('chat',args)).verified,true);
+  await bridge.writeDataTableRows('chat',args);
+  assert.equal(calls.length,2);
+  assert.equal(calls[1].method,'data_table_write_rows');
+  assert.deepEqual(calls[1].params.rows,args.rows);
+  assert.equal(calls[1].params.mode,'upsert');
+});
+test('DataTable row writer requires capability and verified preview/commit',async t=>{
+  const bridge=await fixture(t);
+  const calls=await editor(bridge,()=>({ok:true,result:{verified:false}}),[]);
+  await assert.rejects(bridge.writeDataTableRows('chat',writeRows()),{code:'DATA_TABLE_WRITE_ROWS_UNAVAILABLE'});
+  assert.equal(calls.length,0);
+  bridge.target('chat').capabilities.push('data_table_write_rows');
+  await assert.rejects(bridge.writeDataTableRows('chat',writeRows()),{code:'DATA_TABLE_PREVIEW_INVALID'});
+  await assert.rejects(bridge.writeDataTableRows('chat',{...writeRows(),dryRun:false}),{code:'DATA_TABLE_ROLLBACK_FAILED'});
+  assert.equal(bridge.state('chat').writeLock.rollback,'failed');
+});
+test('DataTable row writer rejects malformed modes and empty rows before dispatch',async t=>{
+  const bridge=await fixture(t);
+  const calls=await editor(bridge,()=>({ok:true,result:copied}),['data_table_write_rows']);
+  for(const args of [{...writeRows(),mode:'replace'},{...writeRows(),rows:[]},{...writeRows(),mode:'update',rows:[{rowName:'Car',values:{}}]}]){
+    await assert.rejects(bridge.writeDataTableRows('chat',args));
+  }
+  assert.equal(calls.length,0);
+});
+
+test('DataTable add alias supports struct defaults and distinct values without overwriting existing rows',async t=>{
+  const bridge=await fixture(t);
+  const calls=await editor(bridge,m=>({ok:true,result:{...copied,dryRun:m.params.dryRun}}),['data_table_write_rows']);
+  const args={assetPath:'/Game/DT_Test',rows:[{rowName:'Defaults'},{rowName:'Custom',values:{Label:'Custom'}}],requestId:randomUUID()};
+  assert.equal((await bridge.addDataTableRows('chat',args)).dryRun,true);
+  assert.equal(calls[0].params.mode,'add');
+  assert.deepEqual(calls[0].params.rows,[{rowName:'Defaults',values:{}},{rowName:'Custom',values:{Label:'Custom'}}]);
+});
+
+const manageRows=(action,fields={})=>({assetPath:'/Game/DT_Test',action,...fields,requestId:randomUUID()});
+test('DataTable lifecycle previews are read-only and each apply is deduplicated',async t=>{
+  const bridge=await fixture(t,{allowWrites:false});
+  const calls=await editor(bridge,m=>({ok:true,result:{...copied,dryRun:m.params.dryRun}}),['data_table_manage_rows']);
+  for(const args of [manageRows('rename',{renames:[{rowName:'Car',newRowName:'Bus'}]}),manageRows('delete',{rows:['Car']}),manageRows('duplicate',{copies:[{sourceRow:'Car',newRowName:'Copy'}]}),manageRows('clear')]){
+    const count=calls.length;
+    bridge.config.allowWrites=false;
+    assert.equal((await bridge.manageDataTableRows('chat',args)).dryRun,true);
+    const commit={...args,dryRun:false,requestId:randomUUID()};
+    await assert.rejects(bridge.manageDataTableRows('chat',commit),{code:'READ_ONLY'});
+    bridge.config.allowWrites=true;
+    const result=await bridge.manageDataTableRows('chat',commit);
+    assert.equal(result.verified,true);
+    assert.deepEqual(await bridge.manageDataTableRows('chat',commit),result);
+    assert.equal(calls.length,count+2);
+    assert.equal(calls.at(-1).method,'data_table_manage_rows');
+    assert.equal(calls.at(-1).params.action,args.action);
+  }
+});
+
+test('DataTable lifecycle requires capabilities, strict action arguments and verified results',async t=>{
+  const bridge=await fixture(t);
+  const calls=await editor(bridge,()=>({ok:true,result:{verified:false}}),[]);
+  await assert.rejects(bridge.manageDataTableRows('chat',manageRows('clear')),{code:'DATA_TABLE_MANAGE_ROWS_UNAVAILABLE'});
+  bridge.target('chat').capabilities.push('data_table_manage_rows');
+  for(const args of [manageRows('delete'),manageRows('delete',{rows:[]}),manageRows('clear',{rows:['Car']}),manageRows('rename',{renames:[{rowName:'Car'}]})])await assert.rejects(bridge.manageDataTableRows('chat',args));
+  assert.equal(calls.length,0);
+  await assert.rejects(bridge.manageDataTableRows('chat',manageRows('clear')),{code:'DATA_TABLE_PREVIEW_INVALID'});
+  await assert.rejects(bridge.manageDataTableRows('chat',{...manageRows('clear'),dryRun:false}),{code:'DATA_TABLE_ROLLBACK_FAILED'});
+  bridge.bind('other-chat','editor');
+  await assert.rejects(bridge.manageDataTableRows('other-chat',{...manageRows('clear'),dryRun:false}),{code:'EDITOR_WRITE_LOCKED'});
+  assert.equal(calls.length,2);
+});
+
+test('DataTable lifecycle recovery rejects an unverified completed result after timeout',async t=>{
+  const bridge=await fixture(t,{requestTimeoutMs:20});
+  await editor(bridge,m=>m.method==='request_status'?{ok:true,result:{status:'completed',response:{ok:true,result:{verified:true,dryRun:true}}}}:undefined,['data_table_manage_rows']);
+  const args={...manageRows('delete',{rows:['Car']}),dryRun:false};
+  await assert.rejects(bridge.manageDataTableRows('chat',args),{code:'TIMEOUT'});
+  await assert.rejects(bridge.requestStatus('chat',args.requestId),{code:'DATA_TABLE_ROLLBACK_FAILED'});
+  assert.equal(bridge.state('chat').writeLock.rollback,'failed');
+});
+
+test('DataTable container patch guards older editors and rejects case-colliding values',async t=>{
+  const bridge=await fixture(t);
+  const calls=await editor(bridge,m=>({ok:true,result:{...copied,dryRun:m.params.dryRun}}),['data_table_patch']);
+  const args={...patch(),operations:[{op:'remove',path:['FloatParameters','Speed']},{op:'set',path:['AnimToPlay'],value:null}]};
+  await assert.rejects(bridge.patchDataTable('chat',args),{code:'DATA_TABLE_PATCH_UNAVAILABLE'});
+  bridge.target('chat').capabilities.push('data_table_patch_containers');
+  assert.equal((await bridge.patchDataTable('chat',args)).verified,true);
+  await assert.rejects(bridge.patchDataTable('chat',{...patch(),operations:[{op:'set',path:['FloatParameters'],value:{Speed:1,speed:2}}]}),{code:'INVALID_TARGET_ROWS'});
+  assert.equal(calls.length,1);
+});
+test('DataTable rejects case-colliding JSON fields and map keys before UE can collapse them',async t=>{
+  const bridge=await fixture(t);
+  const calls=await editor(bridge,()=>({ok:true,result:copied}),['data_table_write_rows']);
+  for(const values of [{Label:'A',label:'B'},{FloatParameters:{Speed:1,speed:2}}]){
+    await assert.rejects(bridge.writeDataTableRows('chat',{...writeRows(),rows:[{rowName:'Car',values}],dryRun:false}),{code:'INVALID_TARGET_ROWS'});
+  }
+  assert.equal(calls.length,0);
+});
 test('DataTable patch previews without write permission and commits once with native verification',async t=>{
   const bridge=await fixture(t,{allowWrites:false});
   const calls=await editor(bridge,m=>({ok:true,result:{...copied,dryRun:m.params.dryRun}}),['data_table_patch']);

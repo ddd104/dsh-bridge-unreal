@@ -6,6 +6,8 @@
 #include "Engine/DataTable.h"
 #include "JsonObjectConverter.h"
 #include "Misc/PackageName.h"
+#include "Misc/Change.h"
+#include "Misc/ITransaction.h"
 #include "ScopedTransaction.h"
 #include "StructUtils/InstancedStruct.h"
 #include "UObject/GCObject.h"
@@ -123,7 +125,7 @@ bool Verify(UDataTable* Table, const UScriptStruct* RowStruct,
     for (const auto& Row : Table->GetRowMap())
     {
         const FRowSnapshot& Original = Before[Index++];
-        if (Row.Key != Original.Name || !Row.Value)
+        if (Row.Key != Original.Name || !Row.Key.ToString().Equals(Original.Name.ToString(), ESearchCase::CaseSensitive) || !Row.Value)
         {
             Reason = TEXT("The row names, order or row storage changed during the copy");
             return false;
@@ -156,7 +158,8 @@ bool Restore(UDataTable* Table, UScriptStruct* RowStruct, const TArray<FRowSnaps
     {
         for (const auto& Row : Table->GetRowMap())
         {
-            if (Row.Key != Before[Index++].Name || !Row.Value) { bSameRows = false; break; }
+            const FName ExpectedName = Before[Index++].Name;
+            if (Row.Key != ExpectedName || !Row.Key.ToString().Equals(ExpectedName.ToString(), ESearchCase::CaseSensitive) || !Row.Value) { bSameRows = false; break; }
         }
     }
     if (bSameRows)
@@ -193,6 +196,38 @@ bool Restore(UDataTable* Table, UScriptStruct* RowStruct, const TArray<FRowSnaps
     FString Reason;
     return Verify(Table, RowStruct, Before, {}, nullptr, nullptr, Reason);
 }
+
+// Transaction serialization compares FNames case-insensitively and discards a
+// case-only rename. Store an explicit change so every rename is undoable.
+class FDSHRowRenameChange final : public FCommandChange
+{
+public:
+    FDSHRowRenameChange(UScriptStruct* InType, TArray<FRowSnapshot>&& InBefore, TArray<FRowSnapshot>&& InAfter, SIZE_T InSize)
+        : Type(InType), Before(MoveTemp(InBefore)), After(MoveTemp(InAfter)), Size(InSize) {}
+    void Apply(UObject* Object) override { Install(Object, After); }
+    void Revert(UObject* Object) override { Install(Object, Before); }
+    bool HasExpired(UObject* Object) const override
+    { const UDataTable* Table = Cast<UDataTable>(Object); return !Table || Table->GetRowStruct() != Type; }
+    void AddReferencedObjects(FReferenceCollector& Collector) override
+    {
+        Collector.AddReferencedObject(Type);
+        for (auto* Rows : {&Before, &After}) for (auto& Row : *Rows) Row.Data->AddReferencedObjects(Collector);
+    }
+    FString ToString() const override { return TEXT("Rename DataTable rows"); }
+    SIZE_T GetSize() const override { return Size; }
+private:
+    void Install(UObject* Object, const TArray<FRowSnapshot>& Rows)
+    {
+        UDataTable* Table = Cast<UDataTable>(Object);
+        if (!Table || Table->GetRowStruct() != Type) return;
+        FDataTableEditorUtils::BroadcastPreChange(Table, FDataTableEditorUtils::EDataTableChangeInfo::RowList);
+        if (Restore(Table, Type, Rows))
+            FDataTableEditorUtils::BroadcastPostChange(Table, FDataTableEditorUtils::EDataTableChangeInfo::RowList);
+    }
+    TObjectPtr<UScriptStruct> Type;
+    TArray<FRowSnapshot> Before, After;
+    SIZE_T Size;
+};
 
 bool ValidName(const FString& Value, int32 MaxLength)
 {
@@ -393,7 +428,9 @@ FProperty* RowField(const UStruct* Type, const FString& Name)
     {
         if (It->HasAnyPropertyFlags(CPF_Deprecated)) continue;
         if (It->GetName() == Name) return *It;
-        if (FJsonObjectConverter::StandardizeCase(It->GetName()) == Name) { Alias = *It; ++Matches; }
+        if (FJsonObjectConverter::StandardizeCase(It->GetName()) == Name
+            || It->GetAuthoredName() == Name
+            || FJsonObjectConverter::StandardizeCase(It->GetAuthoredName()) == Name) { Alias = *It; ++Matches; }
     }
     return Matches == 1 ? Alias : nullptr;
 }
@@ -522,6 +559,444 @@ bool SetScalar(const FFieldValue& Field, const TSharedPtr<FJsonValue>& Value)
 }
 }
 
+namespace
+{
+struct FPropertyStorage
+{
+    FProperty* Property;
+    void* Data;
+    explicit FPropertyStorage(FProperty* InProperty) : Property(InProperty), Data(Property->AllocateAndInitializeValue()) {}
+    ~FPropertyStorage() { Property->DestroyAndFreeValue(Data); }
+};
+
+// Import only explicitly supplied values into native snapshots. Never export and
+// reimport existing rows: UE's JSON export/import formats are not symmetric.
+struct FRowValueWriter
+{
+    FSnapshotBudget& Budget;
+    FString Reason;
+    int32 Entries = 0;
+
+    bool Reject(const FString& Message) { Reason = Message; return false; }
+    bool Struct(const UScriptStruct* Type, void* Data, const TSharedPtr<FJsonObject>& Object, int32 Depth)
+    {
+        if (Depth > 32) return Reject(TEXT("Values exceed maximum nesting depth"));
+        TSet<FProperty*> Seen;
+        for (const auto& Pair : Object->Values)
+        {
+            const FString Name(Pair.Key);
+            FProperty* Property = Name.Len() <= 160 ? RowField(Type, Name) : nullptr;
+            if (!Property || Seen.Contains(Property)) return Reject(TEXT("Unknown, ambiguous or duplicate field: ") + Name);
+            Seen.Add(Property);
+            if (!Value(Property, Property->ContainerPtrToValuePtr<void>(Data), Pair.Value, Depth + 1, true))
+            { Reason = Name + TEXT(": ") + Reason; return false; }
+        }
+        return true;
+    }
+
+    bool Key(FProperty* Property, void* Data, const FString& Name)
+    {
+        if (Name.Len() > 160) return false;
+        // JSON object keys are strings, including integer map keys.
+        if (const FNumericProperty* Numeric = CastField<FNumericProperty>(Property);
+            Numeric && Numeric->IsInteger() && !(CastField<FByteProperty>(Property) && CastField<FByteProperty>(Property)->Enum))
+        {
+            int64 Number;
+            if (!LexTryParseString(Number, *Name) || LexToString(Number) != Name || !Numeric->CanHoldValue(Number)) return false;
+            Numeric->SetIntPropertyValue(Data, Number);
+            return true;
+        }
+        return SetScalar({Property, Data}, MakeShared<FJsonValueString>(Name));
+    }
+
+    bool Value(FProperty* Property, void* Data, const TSharedPtr<FJsonValue>& Json, int32 Depth, bool bWholeProperty = false)
+    {
+        if (!Json || Depth > 32 || ++Entries > 16384 || !Budget.Add(64))
+            return Reject(TEXT("Values exceed the depth, entry or memory limit"));
+        if (bWholeProperty && Property->ArrayDim > 1)
+        {
+            const TArray<TSharedPtr<FJsonValue>>* Values = nullptr;
+            if (!Json->TryGetArray(Values) || Values->Num() != Property->ArrayDim) return Reject(TEXT("Static array requires its exact element count"));
+            for (int32 I = 0; I < Values->Num(); ++I)
+                if (!Value(Property, static_cast<uint8*>(Data) + I * Property->ElementSize, (*Values)[I], Depth + 1)) return false;
+            return true;
+        }
+        if (const FArrayProperty* Array = CastField<FArrayProperty>(Property))
+        {
+            const TArray<TSharedPtr<FJsonValue>>* Values = nullptr;
+            if (!Json->TryGetArray(Values) || Values->Num() > 16384
+                || !Budget.Add(static_cast<int64>(Values->Num()) * Array->Inner->ElementSize)) return Reject(TEXT("Invalid or oversized array"));
+            FScriptArrayHelper Helper(Array, Data);
+            Helper.EmptyAndAddValues(Values->Num());
+            for (int32 I = 0; I < Values->Num(); ++I)
+                if (!Value(Array->Inner, Helper.GetRawPtr(I), (*Values)[I], Depth + 1)) return false;
+            return true;
+        }
+        if (const FMapProperty* Map = CastField<FMapProperty>(Property))
+        {
+            const TSharedPtr<FJsonObject>* Object = nullptr;
+            if (!Json->TryGetObject(Object) || !Object || !*Object || (*Object)->Values.Num() > 4096) return Reject(TEXT("Map requires an object with at most 4096 keys"));
+            FScriptMapHelper Helper(Map, Data);
+            TSet<FString> Seen;
+            for (const auto& Pair : (*Object)->Values)
+            {
+                FPropertyStorage KeyStorage(Map->KeyProp);
+                if (!Key(Map->KeyProp, KeyStorage.Data, FString(Pair.Key))) return Reject(TEXT("Invalid map key: ") + FString(Pair.Key));
+                FString Canonical;
+                Map->KeyProp->ExportTextItem_Direct(Canonical, KeyStorage.Data, nullptr, nullptr, PPF_None);
+                // FName equality ignores case.
+                if (CastField<FNameProperty>(Map->KeyProp)) Canonical.ToLowerInline();
+                if (Seen.Contains(Canonical)) return Reject(TEXT("Duplicate map key aliases"));
+                Seen.Add(Canonical);
+                int32 Index = Helper.FindMapIndexWithKey(KeyStorage.Data);
+                if (Index == INDEX_NONE)
+                {
+                    if (!Budget.Add(Map->KeyProp->ElementSize + Map->ValueProp->ElementSize + 64)) return Reject(TEXT("Map exceeds memory limit"));
+                    Index = Helper.AddDefaultValue_Invalid_NeedsRehash();
+                    Map->KeyProp->CopySingleValue(Helper.GetKeyPtr(Index), KeyStorage.Data);
+                    Helper.Rehash();
+                }
+                if (!Value(Map->ValueProp, Helper.GetValuePtr(Index), Pair.Value, Depth + 1)) return false;
+            }
+            return true;
+        }
+        if (const FStructProperty* StructProperty = CastField<FStructProperty>(Property))
+        {
+            if (StructProperty->Struct == TBaseStructure<FInstancedStruct>::Get()) return Reject(TEXT("InstancedStruct writes are not supported"));
+            const TSharedPtr<FJsonObject>* Object = nullptr;
+            if (!Json->TryGetObject(Object) || !Object || !*Object) return Reject(TEXT("Struct requires an object of field values"));
+            return Struct(StructProperty->Struct, Data, *Object, Depth + 1);
+        }
+        if (const FObjectPropertyBase* ObjectProperty = CastField<FObjectPropertyBase>(Property))
+        {
+            FString Path;
+            const TSharedPtr<FJsonObject>* Reference = nullptr;
+            if (Json->Type == EJson::Null) Path.Reset();
+            else if (Json->Type != EJson::String || !Json->TryGetString(Path))
+            {
+                if (!Json->TryGetObject(Reference) || !Reference || !*Reference || (*Reference)->Values.Num() != 1
+                    || !(*Reference)->TryGetStringField(TEXT("refPath"), Path)) return Reject(TEXT("Object reference requires an object path, {refPath}, or null"));
+            }
+            if (!Path.IsEmpty() && (Path.Len() > 2048 || !FPackageName::IsValidObjectPath(Path)))
+                return Reject(TEXT("Invalid object reference path"));
+            // Soft references remain soft and do not load assets.
+            if (const FSoftObjectProperty* Soft = CastField<FSoftObjectProperty>(Property))
+            { Soft->SetPropertyValue(Data, FSoftObjectPtr(FSoftObjectPath(Path))); return true; }
+            UObject* Object = Path.IsEmpty() ? nullptr : LoadObject<UObject>(nullptr, *Path);
+            if (!Path.IsEmpty() && (!Object || !Object->IsA(ObjectProperty->PropertyClass))) return Reject(TEXT("Object reference is missing or has the wrong class"));
+            if (const FClassProperty* Class = CastField<FClassProperty>(Property);
+                Class && Object && (!Cast<UClass>(Object) || !Cast<UClass>(Object)->IsChildOf(Class->MetaClass))) return Reject(TEXT("Class reference has the wrong base class"));
+            ObjectProperty->SetObjectPropertyValue(Data, Object);
+            return true;
+        }
+        FString Text;
+        if (const FTextProperty* TextProperty = CastField<FTextProperty>(Property))
+        {
+            if (Json->Type != EJson::String || !Json->TryGetString(Text) || Text.Len() > 8192 || !Budget.Add(Text.Len() * sizeof(TCHAR))) return Reject(TEXT("Text requires a string of at most 8192 characters"));
+            TextProperty->SetPropertyValue(Data, FText::FromString(Text));
+            return true;
+        }
+        if (Json->Type == EJson::String && (!Json->TryGetString(Text) || Text.Len() > 8192 || !Budget.Add(Text.Len() * sizeof(TCHAR))))
+            return Reject(TEXT("String exceeds memory or length limit"));
+        if (!SetScalar({Property, Data}, Json)) return Reject(TEXT("Unsupported property type or incompatible value"));
+        return true;
+    }
+};
+}
+
+TSharedPtr<FJsonObject> FDSHDataTableOps::WriteRows(const TSharedPtr<FJsonObject>& Params,
+    FString& ErrorCode, FString& ErrorMessage, TSharedPtr<FJsonObject>& ErrorDetails)
+{
+    ErrorCode.Reset(); ErrorMessage.Reset(); ErrorDetails = MakeShared<FJsonObject>();
+    ErrorDetails->SetStringField(TEXT("rollback"), TEXT("not_needed"));
+    ErrorDetails->SetBoolField(TEXT("retryable"), false);
+    auto Fail = [&](const TCHAR* Code, const FString& Message) -> TSharedPtr<FJsonObject>
+    { ErrorCode = Code; ErrorMessage = Message; return nullptr; };
+    if (!IsInGameThread() || !Params) return Fail(TEXT("INVALID_REQUEST"), TEXT("Row writes require arguments on the editor game thread"));
+    const TSet<FString> Keys = {TEXT("assetPath"), TEXT("mode"), TEXT("rows"), TEXT("dryRun")};
+    for (const auto& Pair : Params->Values) if (!Keys.Contains(FString(Pair.Key))) return Fail(TEXT("INVALID_REQUEST"), TEXT("Unknown row-write argument"));
+    FString Path, Mode = TEXT("update");
+    bool bDryRun = true;
+    const TArray<TSharedPtr<FJsonValue>>* Rows = nullptr;
+    if (!Params->TryGetStringField(TEXT("assetPath"), Path) || Path.Len() > 512
+        || (Params->HasField(TEXT("dryRun")) && !Params->TryGetBoolField(TEXT("dryRun"), bDryRun))
+        || (Params->HasField(TEXT("mode")) && !Params->TryGetStringField(TEXT("mode"), Mode))
+        || (Mode != TEXT("update") && Mode != TEXT("add") && Mode != TEXT("upsert"))
+        || !Params->TryGetArrayField(TEXT("rows"), Rows) || Rows->IsEmpty() || Rows->Num() > MaxTargets)
+        return Fail(TEXT("INVALID_REQUEST"), TEXT("Supply assetPath, update/add/upsert mode, boolean dryRun and 1 to 4096 rows"));
+    const FString PackageName = FPackageName::ObjectPathToPackageName(Path);
+    const FString ObjectPath = PackageName + TEXT(".") + FPackageName::GetShortName(PackageName);
+    if (!FPackageName::IsValidLongPackageName(PackageName) || !PackageName.StartsWith(TEXT("/Game/"))
+        || (Path != PackageName && Path != ObjectPath)) return Fail(TEXT("INVALID_ASSET_PATH"), TEXT("Use a top-level /Game/ DataTable asset"));
+    TStrongObjectPtr<UDataTable> Table(Cast<UDataTable>(LoadObject<UObject>(nullptr, *ObjectPath)));
+    if (!Table || Table->GetClass() != UDataTable::StaticClass()) return Fail(TEXT("NOT_DATA_TABLE"), TEXT("Only ordinary DataTables support row writes"));
+    TStrongObjectPtr<UScriptStruct> Type(Table->RowStruct);
+    if (!Type) return Fail(TEXT("INVALID_ROW_STRUCT"), TEXT("DataTable has no row struct"));
+    if (GEditor && GEditor->IsTransactionActive()) return Fail(TEXT("EDITOR_BUSY"), TEXT("Finish the active editor transaction first"));
+    FSnapshotBudget Budget;
+    if (Table->GetRowMap().Num() > MaxSnapshotRows || !Budget.Add(2LL * Type->GetStructureSize() * Table->GetRowMap().Num()))
+        return Fail(TEXT("SNAPSHOT_LIMIT"), TEXT("DataTable exceeds snapshot limits"));
+    for (const auto& Row : Table->GetRowMap())
+        if (!Row.Value || !Budget.Struct(Type.Get(), Row.Value) || !Budget.Struct(Type.Get(), Row.Value))
+            return Fail(TEXT("SNAPSHOT_LIMIT"), TEXT("DataTable exceeds snapshot limits"));
+    TArray<FRowSnapshot> Before, Expected;
+    FSnapshotReferences BeforeReferences(Before), ExpectedReferences(Expected);
+    TMap<FName, int32> Indices;
+    for (const auto& Row : Table->GetRowMap())
+    {
+        Indices.Add(Row.Key, Before.Num());
+        for (auto* Snapshots : {&Before, &Expected})
+        {
+            auto& Snapshot = Snapshots->AddDefaulted_GetRef(); Snapshot.Name = Row.Key;
+            Snapshot.Data = MakeUnique<FStructOnScope>(Type.Get());
+            Type->CopyScriptStruct(Snapshot.Data->GetStructMemory(), Row.Value);
+        }
+    }
+    FString Reason;
+    if (!Verify(Table.Get(), Type.Get(), Before, {}, nullptr, nullptr, Reason)) return Fail(TEXT("SNAPSHOT_VALIDATION_FAILED"), Reason);
+    FRowValueWriter Writer{Budget};
+    TSet<FName> Targets;
+    for (const auto& Row : *Rows)
+    {
+        const TSharedPtr<FJsonObject>* Entry = nullptr;
+        const TSharedPtr<FJsonObject>* Values = nullptr;
+        FString Name;
+        if (!Row || !Row->TryGetObject(Entry) || !Entry || !*Entry || (*Entry)->Values.Num() != 2
+            || !(*Entry)->TryGetStringField(TEXT("rowName"), Name) || !ValidName(Name, 1023)
+            || !FName::IsValidXName(Name, INVALID_NAME_CHARACTERS)
+            || !(*Entry)->TryGetObjectField(TEXT("values"), Values) || !Values || !*Values)
+            return Fail(TEXT("INVALID_TARGET_ROWS"), TEXT("Each row needs a valid rowName and values object"));
+        const FName RowName(*Name);
+        ErrorDetails->SetStringField(TEXT("row"), Name);
+        if (Targets.Contains(RowName)) return Fail(TEXT("DUPLICATE_TARGET_ROW"), TEXT("Row names must be unique (case insensitive)"));
+        Targets.Add(RowName);
+        const int32* ExistingIndex = Indices.Find(RowName);
+        int32 Index = ExistingIndex ? *ExistingIndex : INDEX_NONE;
+        const bool bExists = Index != INDEX_NONE;
+        if (bExists && Mode == TEXT("add")) return Fail(TEXT("ROW_ALREADY_EXISTS"), TEXT("Row already exists: ") + Name);
+        if (!bExists && Mode == TEXT("update")) return Fail(TEXT("ROW_NOT_FOUND"), TEXT("Row does not exist: ") + Name);
+        if (bExists && (*Values)->Values.IsEmpty()) return Fail(TEXT("INVALID_TARGET_ROWS"), TEXT("Existing rows require nonempty values; only new rows can use defaults"));
+        if (!bExists)
+        {
+            if (Expected.Num() >= MaxSnapshotRows || !Budget.Add(Type->GetStructureSize())) return Fail(TEXT("SNAPSHOT_LIMIT"), TEXT("New rows exceed snapshot limits"));
+            Index = Expected.Num();
+            auto& Snapshot = Expected.AddDefaulted_GetRef(); Snapshot.Name = RowName;
+            Snapshot.Data = MakeUnique<FStructOnScope>(Type.Get());
+            if (!Budget.Struct(Type.Get(), Snapshot.Data->GetStructMemory())) return Fail(TEXT("SNAPSHOT_LIMIT"), TEXT("Row defaults exceed snapshot limits"));
+            Indices.Add(RowName, Index);
+        }
+        if (!Writer.Struct(Type.Get(), Expected[Index].Data->GetStructMemory(), *Values, 0))
+            return Fail(TEXT("PROPERTY_VALUE_INVALID"), Writer.Reason);
+    }
+    TArray<int32> Changed;
+    for (int32 I = 0; I < Expected.Num(); ++I)
+        if (I >= Before.Num() || !Type->CompareScriptStruct(Before[I].Data->GetStructMemory(), Expected[I].Data->GetStructMemory(), PPF_None)) Changed.Add(I);
+    const int32 Added = Expected.Num() - Before.Num();
+    UPackage* Package = Table->GetOutermost(); const bool bDirtyBefore = Package->IsDirty();
+    auto Success = [&]()
+    {
+        auto Result = MakeShared<FJsonObject>();
+        Result->SetStringField(TEXT("assetPath"), Table->GetPathName());
+        Result->SetBoolField(TEXT("verified"), true); Result->SetBoolField(TEXT("dryRun"), bDryRun); Result->SetBoolField(TEXT("saved"), false);
+        Result->SetNumberField(TEXT("targetCount"), Targets.Num()); Result->SetNumberField(TEXT("changedRows"), Changed.Num());
+        Result->SetNumberField(TEXT("addedRows"), Added); Result->SetNumberField(TEXT("updatedRows"), Changed.Num() - Added);
+        Result->SetNumberField(TEXT("unchangedRows"), Targets.Num() - Changed.Num());
+        Result->SetBoolField(TEXT("dirtyBefore"), bDirtyBefore); Result->SetBoolField(TEXT("dirtyAfter"), Package->IsDirty());
+        return Result;
+    };
+    if (bDryRun || Changed.IsEmpty()) return Success();
+    FScopedTransaction Transaction(NSLOCTEXT("DSHUnrealBridge", "WriteDataTableRows", "Write DataTable rows"));
+    const bool bWasTransactional = Table->HasAnyFlags(RF_Transactional);
+    Table->SetFlags(RF_Transactional); Table->Modify();
+    const auto Change = Added ? FDataTableEditorUtils::EDataTableChangeInfo::RowList : FDataTableEditorUtils::EDataTableChangeInfo::RowData;
+    auto Rollback = [&]() -> TSharedPtr<FJsonObject>
+    {
+        bool bRestored = Restore(Table.Get(), Type.Get(), Before);
+        if (bRestored)
+        {
+            FDataTableEditorUtils::BroadcastPostChange(Table.Get(), Change);
+            bRestored = Restore(Table.Get(), Type.Get(), Before);
+        }
+        Transaction.Cancel(); if (!bWasTransactional) Table->ClearFlags(RF_Transactional);
+        if (bRestored) Package->SetDirtyFlag(bDirtyBefore);
+        ErrorDetails->SetStringField(TEXT("rollback"), bRestored ? TEXT("restored") : TEXT("failed"));
+        return Fail(bRestored ? TEXT("DATA_TABLE_VERIFICATION_FAILED") : TEXT("DATA_TABLE_ROLLBACK_FAILED"), Reason);
+    };
+    FDataTableEditorUtils::BroadcastPreChange(Table.Get(), Change);
+    if (!Verify(Table.Get(), Type.Get(), Before, {}, nullptr, nullptr, Reason)) return Rollback();
+    // Write staged native rows without callbacks between rows. One notification
+    // follows the complete batch; its effects are verified against all rows.
+    auto& RowMap = const_cast<TMap<FName, uint8*>&>(Table->GetRowMap());
+    for (int32 Index : Changed)
+    {
+        const auto& Row = Expected[Index];
+        uint8* Data = Table->FindRowUnchecked(Row.Name);
+        if (!Data)
+        {
+            Data = static_cast<uint8*>(FMemory::Malloc(Type->GetStructureSize(), Type->GetMinAlignment()));
+            Type->InitializeStruct(Data);
+            RowMap.Add(Row.Name, Data);
+        }
+        Type->CopyScriptStruct(Data, Row.Data->GetStructMemory());
+    }
+    FDataTableEditorUtils::BroadcastPostChange(Table.Get(), Change);
+    if (!Verify(Table.Get(), Type.Get(), Expected, {}, nullptr, nullptr, Reason)) return Rollback();
+    return Success();
+}
+
+TSharedPtr<FJsonObject> FDSHDataTableOps::ManageRows(const TSharedPtr<FJsonObject>& Params,
+    FString& ErrorCode, FString& ErrorMessage, TSharedPtr<FJsonObject>& ErrorDetails)
+{
+    ErrorCode.Reset(); ErrorMessage.Reset(); ErrorDetails = MakeShared<FJsonObject>();
+    ErrorDetails->SetStringField(TEXT("rollback"), TEXT("not_needed"));
+    ErrorDetails->SetBoolField(TEXT("retryable"), false);
+    auto Fail = [&](const TCHAR* Code, const FString& Message) -> TSharedPtr<FJsonObject>
+    { ErrorCode = Code; ErrorMessage = Message; return nullptr; };
+    if (!IsInGameThread() || !Params) return Fail(TEXT("INVALID_REQUEST"), TEXT("Row management requires arguments on the editor game thread"));
+    FString Path, Action;
+    bool bDryRun = true;
+    if (!Params->TryGetStringField(TEXT("assetPath"), Path) || Path.Len() > 512
+        || !Params->TryGetStringField(TEXT("action"), Action)
+        || (Params->HasField(TEXT("dryRun")) && !Params->TryGetBoolField(TEXT("dryRun"), bDryRun)))
+        return Fail(TEXT("INVALID_REQUEST"), TEXT("Supply assetPath, action and boolean dryRun"));
+    const bool bRename = Action == TEXT("rename"), bDelete = Action == TEXT("delete"), bDuplicate = Action == TEXT("duplicate"), bClear = Action == TEXT("clear");
+    if (!bRename && !bDelete && !bDuplicate && !bClear) return Fail(TEXT("INVALID_REQUEST"), TEXT("Unknown row action"));
+    const TCHAR* EntryKey = bRename ? TEXT("renames") : bDuplicate ? TEXT("copies") : TEXT("rows");
+    TSet<FString> Keys = {TEXT("assetPath"), TEXT("action"), TEXT("dryRun")};
+    if (!bClear) Keys.Add(EntryKey);
+    for (const auto& Pair : Params->Values) if (!Keys.Contains(FString(Pair.Key))) return Fail(TEXT("INVALID_REQUEST"), TEXT("Unknown row-management argument"));
+    const TArray<TSharedPtr<FJsonValue>>* Entries = nullptr;
+    if (!bClear && (!Params->TryGetArrayField(EntryKey, Entries) || Entries->IsEmpty() || Entries->Num() > MaxTargets))
+        return Fail(TEXT("INVALID_REQUEST"), TEXT("Supply 1 to 4096 row entries"));
+    const FString PackageName = FPackageName::ObjectPathToPackageName(Path);
+    const FString ObjectPath = PackageName + TEXT(".") + FPackageName::GetShortName(PackageName);
+    if (!FPackageName::IsValidLongPackageName(PackageName) || !PackageName.StartsWith(TEXT("/Game/"))
+        || (Path != PackageName && Path != ObjectPath)) return Fail(TEXT("INVALID_ASSET_PATH"), TEXT("Use a top-level /Game/ DataTable asset"));
+    TStrongObjectPtr<UDataTable> Table(Cast<UDataTable>(LoadObject<UObject>(nullptr, *ObjectPath)));
+    if (!Table || Table->GetClass() != UDataTable::StaticClass()) return Fail(TEXT("NOT_DATA_TABLE"), TEXT("Only ordinary DataTables support row management"));
+    TStrongObjectPtr<UScriptStruct> Type(Table->RowStruct);
+    if (!Type) return Fail(TEXT("INVALID_ROW_STRUCT"), TEXT("DataTable has no row struct"));
+    if (GEditor && GEditor->IsTransactionActive()) return Fail(TEXT("EDITOR_BUSY"), TEXT("Finish the active editor transaction first"));
+    FSnapshotBudget Budget;
+    if (Table->GetRowMap().Num() > MaxSnapshotRows || !Budget.Add(2LL * Type->GetStructureSize() * Table->GetRowMap().Num()))
+        return Fail(TEXT("SNAPSHOT_LIMIT"), TEXT("DataTable exceeds snapshot limits"));
+    for (const auto& Row : Table->GetRowMap())
+        if (!Row.Value || !Budget.Struct(Type.Get(), Row.Value) || !Budget.Struct(Type.Get(), Row.Value))
+            return Fail(TEXT("SNAPSHOT_LIMIT"), TEXT("DataTable exceeds snapshot limits"));
+    TArray<FRowSnapshot> Before, Expected;
+    FSnapshotReferences BeforeReferences(Before), ExpectedReferences(Expected);
+    TMap<FName, int32> Indices;
+    for (const auto& Row : Table->GetRowMap())
+    {
+        Indices.Add(Row.Key, Before.Num());
+        auto& Snapshot = Before.AddDefaulted_GetRef(); Snapshot.Name = Row.Key;
+        Snapshot.Data = MakeUnique<FStructOnScope>(Type.Get());
+        Type->CopyScriptStruct(Snapshot.Data->GetStructMemory(), Row.Value);
+    }
+    FString Reason;
+    if (!Verify(Table.Get(), Type.Get(), Before, {}, nullptr, nullptr, Reason)) return Fail(TEXT("SNAPSHOT_VALIDATION_FAILED"), Reason);
+    TSet<FName> Sources, Destinations;
+    TMap<FName, FName> Renames;
+    TArray<TPair<FName, FName>> Copies;
+    auto IsRowName = [](const FString& Name) { return ValidName(Name, 1023) && FName::IsValidXName(Name, INVALID_NAME_CHARACTERS); };
+    if (Entries) for (const auto& Entry : *Entries)
+    {
+        FString Source, Destination;
+        if (bDelete)
+        {
+            if (!Entry || !Entry->TryGetString(Source)) return Fail(TEXT("INVALID_TARGET_ROWS"), TEXT("rows must contain row names"));
+        }
+        else
+        {
+            const TSharedPtr<FJsonObject>* Object = nullptr;
+            if (!Entry || !Entry->TryGetObject(Object) || !Object || !*Object || (*Object)->Values.Num() != 2
+                || !(*Object)->TryGetStringField(bRename ? TEXT("rowName") : TEXT("sourceRow"), Source)
+                || !(*Object)->TryGetStringField(TEXT("newRowName"), Destination) || !IsRowName(Destination))
+                return Fail(TEXT("INVALID_TARGET_ROWS"), TEXT("Supply valid source and newRowName pairs"));
+        }
+        if (!IsRowName(Source)) return Fail(TEXT("INVALID_TARGET_ROWS"), TEXT("Invalid source row name"));
+        const FName SourceName(*Source), DestinationName(*Destination);
+        if (!Indices.Contains(SourceName)) return Fail(TEXT("ROW_NOT_FOUND"), TEXT("Row does not exist: ") + Source);
+        if (!bDuplicate && Sources.Contains(SourceName)) return Fail(TEXT("DUPLICATE_TARGET_ROW"), TEXT("Duplicate source row: ") + Source);
+        Sources.Add(SourceName);
+        if (!bDelete)
+        {
+            if (Destinations.Contains(DestinationName)) return Fail(TEXT("DUPLICATE_TARGET_ROW"), TEXT("Duplicate destination row: ") + Destination);
+            Destinations.Add(DestinationName);
+            if (bRename) Renames.Add(SourceName, DestinationName);
+            else Copies.Emplace(SourceName, DestinationName);
+        }
+    }
+    for (FName Destination : Destinations)
+        if (Indices.Contains(Destination) && (!bRename || !Sources.Contains(Destination)))
+            return Fail(TEXT("ROW_ALREADY_EXISTS"), TEXT("Destination already exists: ") + Destination.ToString());
+    int32 Changed = 0;
+    auto Append = [&](FName Name, const FRowSnapshot& Source)
+    {
+        auto& Snapshot = Expected.AddDefaulted_GetRef(); Snapshot.Name = Name;
+        Snapshot.Data = MakeUnique<FStructOnScope>(Type.Get());
+        Type->CopyScriptStruct(Snapshot.Data->GetStructMemory(), Source.Data->GetStructMemory());
+    };
+    for (const auto& Row : Before)
+    {
+        if (bClear || (bDelete && Sources.Contains(Row.Name))) { ++Changed; continue; }
+        const FName* NewName = Renames.Find(Row.Name);
+        if (NewName && !NewName->ToString().Equals(Row.Name.ToString(), ESearchCase::CaseSensitive)) ++Changed;
+        Append(NewName ? *NewName : Row.Name, Row);
+    }
+    for (const auto& Copy : Copies)
+    {
+        const auto& Source = Before[Indices[Copy.Key]];
+        if (Expected.Num() >= MaxSnapshotRows || !Budget.Add(Type->GetStructureSize()) || !Budget.Struct(Type.Get(), Source.Data->GetStructMemory()))
+            return Fail(TEXT("SNAPSHOT_LIMIT"), TEXT("Duplicate rows exceed snapshot limits"));
+        Append(Copy.Value, Source); ++Changed;
+    }
+    UPackage* Package = Table->GetOutermost(); const bool bDirtyBefore = Package->IsDirty();
+    auto Success = [&]()
+    {
+        auto Result = MakeShared<FJsonObject>();
+        Result->SetStringField(TEXT("assetPath"), Table->GetPathName()); Result->SetStringField(TEXT("action"), Action);
+        Result->SetBoolField(TEXT("verified"), true); Result->SetBoolField(TEXT("dryRun"), bDryRun); Result->SetBoolField(TEXT("saved"), false);
+        Result->SetNumberField(TEXT("targetCount"), bClear ? Before.Num() : Entries->Num());
+        Result->SetNumberField(TEXT("changedRows"), Changed);
+        Result->SetNumberField(TEXT("renamedRows"), bRename ? Changed : 0);
+        Result->SetNumberField(TEXT("deletedRows"), bDelete || bClear ? Changed : 0);
+        Result->SetNumberField(TEXT("duplicatedRows"), bDuplicate ? Changed : 0);
+        Result->SetNumberField(TEXT("rowCountBefore"), Before.Num()); Result->SetNumberField(TEXT("rowCountAfter"), Expected.Num());
+        Result->SetBoolField(TEXT("dirtyBefore"), bDirtyBefore); Result->SetBoolField(TEXT("dirtyAfter"), Package->IsDirty());
+        return Result;
+    };
+    if (bDryRun || !Changed) return Success();
+    FScopedTransaction Transaction(NSLOCTEXT("DSHUnrealBridge", "ManageDataTableRows", "Manage DataTable rows"));
+    if (bRename && !GUndo) { Transaction.Cancel(); return Fail(TEXT("EDITOR_BUSY"), TEXT("Editor undo recording is unavailable")); }
+    const bool bWasTransactional = Table->HasAnyFlags(RF_Transactional);
+    Table->SetFlags(RF_Transactional);
+    if (bRename) Table->MarkPackageDirty(); else Table->Modify();
+    const auto Change = FDataTableEditorUtils::EDataTableChangeInfo::RowList;
+    auto Rollback = [&]() -> TSharedPtr<FJsonObject>
+    {
+        bool bRestored = Restore(Table.Get(), Type.Get(), Before);
+        if (bRestored)
+        {
+            FDataTableEditorUtils::BroadcastPostChange(Table.Get(), Change);
+            bRestored = Restore(Table.Get(), Type.Get(), Before);
+        }
+        Transaction.Cancel(); if (!bWasTransactional) Table->ClearFlags(RF_Transactional);
+        if (bRestored) Package->SetDirtyFlag(bDirtyBefore);
+        ErrorDetails->SetStringField(TEXT("rollback"), bRestored ? TEXT("restored") : TEXT("failed"));
+        return Fail(bRestored ? TEXT("DATA_TABLE_VERIFICATION_FAILED") : TEXT("DATA_TABLE_ROLLBACK_FAILED"), Reason);
+    };
+    FDataTableEditorUtils::BroadcastPreChange(Table.Get(), Change);
+    if (!Verify(Table.Get(), Type.Get(), Before, {}, nullptr, nullptr, Reason)) return Rollback();
+    // Install the complete staged native row sequence with no callbacks mid-batch.
+    if (!Restore(Table.Get(), Type.Get(), Expected)) { Reason = TEXT("Could not install staged rows"); return Rollback(); }
+    FDataTableEditorUtils::BroadcastPostChange(Table.Get(), Change);
+    if (!Verify(Table.Get(), Type.Get(), Expected, {}, nullptr, nullptr, Reason)) return Rollback();
+    const auto Result = Success();
+    if (bRename) GUndo->StoreUndo(Table.Get(), MakeUnique<FDSHRowRenameChange>(Type.Get(), MoveTemp(Before), MoveTemp(Expected), Budget.Bytes));
+    return Result;
+}
+
 TSharedPtr<FJsonObject> FDSHDataTableOps::Patch(const TSharedPtr<FJsonObject>& Params,
     FString& ErrorCode, FString& ErrorMessage, TSharedPtr<FJsonObject>& ErrorDetails)
 {
@@ -589,6 +1064,7 @@ TSharedPtr<FJsonObject> FDSHDataTableOps::Patch(const TSharedPtr<FJsonObject>& P
     }
     FString Reason;
     if (!Verify(Table.Get(), Type.Get(), Before, {}, nullptr, nullptr, Reason)) return Fail(TEXT("SNAPSHOT_VALIDATION_FAILED"), Reason);
+    FRowValueWriter PatchWriter{Budget};
     for (const auto& OpValue : *Ops)
     {
         const TSharedPtr<FJsonObject>* OpPtr = nullptr;
@@ -596,11 +1072,11 @@ TSharedPtr<FJsonObject> FDSHDataTableOps::Patch(const TSharedPtr<FJsonObject>& P
         const auto& Op = *OpPtr;
         FString Kind, SourceRow;
         TArray<FString> TargetPath, SourcePath;
-        if (!Op->TryGetStringField(TEXT("op"), Kind) || (Kind != TEXT("set") && Kind != TEXT("copy")) || !ReadPath(Op, TEXT("path"), TargetPath))
-            return Fail(TEXT("INVALID_REQUEST"), TEXT("Supply set/copy and a nonempty path of segments"));
+        if (!Op->TryGetStringField(TEXT("op"), Kind) || (Kind != TEXT("set") && Kind != TEXT("copy") && Kind != TEXT("remove")) || !ReadPath(Op, TEXT("path"), TargetPath))
+            return Fail(TEXT("INVALID_REQUEST"), TEXT("Supply set/copy/remove and a nonempty path of segments"));
         const bool bCopy = Kind == TEXT("copy");
         const TSet<FString> OpKeys = bCopy ? TSet<FString>{TEXT("op"), TEXT("path"), TEXT("sourcePath"), TEXT("sourceRow")}
-            : TSet<FString>{TEXT("op"), TEXT("path"), TEXT("value")};
+            : Kind == TEXT("remove") ? TSet<FString>{TEXT("op"), TEXT("path")} : TSet<FString>{TEXT("op"), TEXT("path"), TEXT("value")};
         for (const auto& Pair : Op->Values) if (!OpKeys.Contains(FString(Pair.Key))) return Fail(TEXT("INVALID_REQUEST"), TEXT("Unknown operation argument"));
         if (bCopy && (!ReadPath(Op, TEXT("sourcePath"), SourcePath)
             || (Op->HasField(TEXT("sourceRow")) && (!Op->TryGetStringField(TEXT("sourceRow"), SourceRow) || !ValidName(SourceRow, 1024)))))
@@ -608,6 +1084,33 @@ TSharedPtr<FJsonObject> FDSHDataTableOps::Patch(const TSharedPtr<FJsonObject>& P
         for (FName Target : Targets)
         {
             ErrorDetails->SetStringField(TEXT("row"), Target.ToString());
+            if (Kind == TEXT("remove"))
+            {
+                if (TargetPath.Num() < 2) return Fail(TEXT("PROPERTY_PATH_UNRESOLVED"), TEXT("remove requires a map key or dynamic array index; struct fields cannot be deleted"));
+                TArray<FString> ParentPath = TargetPath;
+                const FString Key = ParentPath.Pop();
+                FFieldValue Parent;
+                if (!ResolveField(Type.Get(), Expected[Indices[Target]].Data->GetStructMemory(), ParentPath, Parent, Reason))
+                    return Fail(TEXT("PROPERTY_PATH_UNRESOLVED"), Reason);
+                if (const FMapProperty* Map = CastField<FMapProperty>(Parent.Property))
+                {
+                    FScriptMapHelper Helper(Map, Parent.Data);
+                    int32 Found = INDEX_NONE;
+                    for (FScriptMapHelper::FIterator It(Helper); It; ++It)
+                        if (MapKeyMatches(Map->KeyProp, Helper.GetKeyPtr(It), Key)) { Found = It.GetInternalIndex(); break; }
+                    if (Found == INDEX_NONE) return Fail(TEXT("PROPERTY_PATH_UNRESOLVED"), TEXT("Map key does not exist: ") + Key);
+                    Helper.RemoveAt(Found);
+                }
+                else if (const FArrayProperty* Array = CastField<FArrayProperty>(Parent.Property))
+                {
+                    FScriptArrayHelper Helper(Array, Parent.Data);
+                    int32 Index;
+                    if (!ArrayIndex(Key, Helper.Num(), Index)) return Fail(TEXT("PROPERTY_PATH_UNRESOLVED"), TEXT("Array index is out of bounds: ") + Key);
+                    Helper.RemoveValues(Index);
+                }
+                else return Fail(TEXT("PROPERTY_TYPE_MISMATCH"), TEXT("remove only supports map entries and dynamic array elements"));
+                continue;
+            }
             FFieldValue Destination;
             if (!ResolveField(Type.Get(), Expected[Indices[Target]].Data->GetStructMemory(), TargetPath, Destination, Reason))
                 return Fail(TEXT("PROPERTY_PATH_UNRESOLVED"), Reason);
@@ -627,8 +1130,8 @@ TSharedPtr<FJsonObject> FDSHDataTableOps::Patch(const TSharedPtr<FJsonObject>& P
             }
             else
             {
-                if (!SetScalar(Destination, Op->TryGetField(TEXT("value")))) return Fail(TEXT("PROPERTY_VALUE_INVALID"), TEXT("set requires a compatible finite number, boolean, string, name or enum; traverse to scalar fields or use copy for containers/structs"));
-                if (!Budget.Add(16384)) return Fail(TEXT("SNAPSHOT_LIMIT"), TEXT("Patch staging exceeds 64 MiB"));
+                if (!PatchWriter.Value(Destination.Property, Destination.Data, Op->TryGetField(TEXT("value")), 0))
+                    return Fail(TEXT("PROPERTY_VALUE_INVALID"), PatchWriter.Reason);
             }
         }
     }

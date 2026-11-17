@@ -5,6 +5,41 @@ import Renderer,{act} from 'react-test-renderer';
 import {UnrealDock,apply} from '../src/client.mjs';
 const assetToggle=tree=>tree.root.findByProps({'aria-controls':'unreal-bridge-assets'});
 
+test('manual candidate panel exposes stable assets, explicit removal/clear and separate live context',async()=>{
+  const candidate={kind:'asset',path:'/Game/Folder/DT_Keep.DT_Keep',class:'DataTable'};
+  const state={version:1,editorId:'ue1',connected:true,editors:[],selectionMode:'manual_assets',selection:[candidate],assetCandidates:{revision:4,assets:[candidate]},liveSelection:[{kind:'actor',path:'/Game/Map.Map:Car',label:'Live car'}]};
+  const calls=[];let tree;
+  await act(async()=>{tree=Renderer.create(React.createElement(UnrealDock,{read:async()=>state,bind:async()=>state,editAssetCandidates:async args=>{calls.push(args);return {...state,version:2,selection:[],assetCandidates:{revision:5,assets:[]}};}}));});
+  assert.match(JSON.stringify(tree.toJSON()),/候选资产 1 个/);
+  assert.match(JSON.stringify(tree.toJSON()),/右击资产 → 添加到 DSH/);
+  assert.match(JSON.stringify(tree.toJSON()),/实时对象 1 个 · 不改变候选资产/);
+  await act(async()=>assetToggle(tree).props.onClick());
+  await act(async()=>tree.root.findByProps({'aria-label':'从候选列表移除 DT_Keep'}).props.onClick());
+  assert.deepEqual(calls,[{editorId:'ue1',revision:4,action:'remove',paths:[candidate.path]}]);
+  assert.match(JSON.stringify(tree.toJSON()),/候选列表为空/);
+  await act(async()=>tree.unmount());
+  await act(async()=>{tree=Renderer.create(React.createElement(UnrealDock,{read:async()=>state,bind:async()=>state,editAssetCandidates:async args=>{calls.push(args);return state;}}));});
+  await act(async()=>tree.root.findByProps({'aria-label':'清空候选资产'}).props.onClick());
+  assert.deepEqual(calls.at(-1),{editorId:'ue1',revision:4,action:'clear'});
+  await act(async()=>tree.unmount());
+});
+
+test('manual candidate controls disable offline and late removals cannot leak into another chat',async()=>{
+  const state={version:1,editorId:'ue1',connected:false,editors:[],selectionMode:'manual_assets',selection:[{path:'/Game/Old.Old'}],assetCandidates:{revision:1,assets:[]}};
+  let tree,resolveEdit;
+  const editAssetCandidates=()=>new Promise(resolve=>{resolveEdit=resolve;});
+  await act(async()=>{tree=Renderer.create(React.createElement(UnrealDock,{read:async()=>state,editAssetCandidates}));});
+  assert.equal(tree.root.findByProps({'aria-label':'清空候选资产'}).props.disabled,true);
+  await act(async()=>tree.update(React.createElement(UnrealDock,{read:async()=>({...state,connected:true}),editAssetCandidates})));
+  let pending;
+  await act(async()=>{pending=tree.root.findByProps({'aria-label':'清空候选资产'}).props.onClick();});
+  const fresh={version:1,editorId:'ue2',connected:true,editors:[],selectionMode:'manual_assets',selection:[],assetCandidates:{revision:0,assets:[]}};
+  await act(async()=>tree.update(React.createElement(UnrealDock,{read:async()=>fresh,editAssetCandidates})));
+  await act(async()=>{resolveEdit({...state,version:100,connected:true});await pending;});
+  assert.match(JSON.stringify(tree.toJSON()),/候选列表为空/);assert.equal(JSON.stringify(tree.toJSON()).includes('Old.Old'),false);
+  await act(async()=>tree.unmount());
+});
+
 test('editor drawer remembers visibility without discarding connection controls or selection state',async()=>{
   const original=Object.getOwnPropertyDescriptor(globalThis,'localStorage');
   const saved=new Map();
@@ -40,9 +75,12 @@ test('editor drawer remembers visibility without discarding connection controls 
 });
 test('client mounts the callable Remote namespace before registering the dock',async()=>{
   let definition;const calls=[];
-  const ctx={remote:{$mount:async contribution=>{assert.equal(contribution.package,'dsh-unreal-bridge');await Promise.resolve();ctx.remote.unrealBridge={state:async s=>({ok:true,value:{sessionId:s}}),bind:async(s,id)=>{calls.push([s,id]);return{ok:true,value:{sessionId:s}};}};}},sessions:{using:async(s,_options,fn)=>fn({binding:{session:{getSnapshot:()=>({openState:'open'})}}})},slots:{inject:(_name,fn)=>fn(),register:d=>{if(d.name==='conversation.input.dock'){assert.ok(ctx.remote.unrealBridge);definition=d;}}}};
+  const ctx={remote:{$mount:async contribution=>{assert.equal(contribution.package,'dsh-unreal-bridge');await Promise.resolve();ctx.remote.unrealBridge={state:async s=>({ok:true,value:{sessionId:s}}),bind:async(s,id)=>{calls.push([s,id]);return{ok:true,value:{sessionId:s}};},editAssetCandidates:async(s,options)=>{calls.push([s,options]);return{ok:true,value:{sessionId:s}};}};}},sessions:{using:async(s,_options,fn)=>fn({binding:{session:{getSnapshot:()=>({openState:'open'})}}})},slots:{inject:(_name,fn)=>fn(),register:d=>{if(d.name==='conversation.input.dock'){assert.ok(ctx.remote.unrealBridge);definition=d;}}}};
   ctx.inject=(keys,fn)=>{if(keys[0]==='configForms')return;assert.deepEqual(keys,['remote.unrealBridge']);assert.ok(ctx.remote.unrealBridge);fn(ctx);};
   await apply(ctx);const ui=definition.inject('conversation-a');assert.deepEqual(await ui.read(),{sessionId:'conversation-a'});await ui.bind('editor-b');assert.deepEqual(calls,[['conversation-a','editor-b']]);
+  const edit={editorId:'editor-b',revision:4,action:'clear'};
+  assert.deepEqual(await ui.editAssetCandidates(edit),{sessionId:'conversation-a'});
+  assert.deepEqual(calls.at(-1),['conversation-a',edit]);
   ctx.remote.unrealBridge.state=async()=>({ok:false,error:{code:'DISCONNECTED',message:'The editor disconnected'}});await assert.rejects(ui.read(),/editor disconnected/);
 });
 

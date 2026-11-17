@@ -71,8 +71,7 @@ bool FDSHBlueprintComponentSelection::RunTest(const FString&)
         auto& Browser = FModuleManager::GetModuleChecked<FContentBrowserModule>(TEXT("ContentBrowser"));
         Browser.GetOnAssetSelectionChanged().Broadcast({FAssetData(Blueprint)}, true); Tracker.Tick();
         Editors->CloseAllEditorsForAsset(Blueprint); Tracker.Tick();
-        if (TestEqual(TEXT("Closing an old Blueprint preserves newer Content selection"), Tracker.GetSelection().Num(), 1))
-            TestEqual(TEXT("Newer asset remains selected"), Tracker.GetSelection()[0]->AsObject()->GetStringField(TEXT("path")), Blueprint->GetPathName());
+        TestTrue(TEXT("Browsing or closing a Blueprint never attaches its asset"), Tracker.GetSelection().IsEmpty());
     }
     return true;
 }

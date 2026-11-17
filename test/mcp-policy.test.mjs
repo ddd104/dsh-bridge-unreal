@@ -23,7 +23,10 @@ test('blocks the actual DataTable JSON writers, their singular aliases and quali
     denied({ name: `${dataTable}.${tool}`, arguments: {} }, 'lossy_json_roundtrip');
   }
   try { assertSafeMcpCall(callTool(dataTable, 'set_rows')); }
-  catch (error) { assert.equal(error.details.recommendedTool, 'unreal_data_table_patch'); }
+  catch (error) { assert.equal(error.details.recommendedTool, 'unreal_data_table_write_rows'); }
+  for(const [tool,recommendedTool] of [['add_rows','unreal_data_table_add_rows'],['rename_row','unreal_data_table_rename_rows'],['rename_rows','unreal_data_table_rename_rows']]){
+    assert.throws(()=>assertSafeMcpCall(callTool(dataTable,tool)),error=>error.details.recommendedTool===recommendedTool);
+  }
 });
 
 test('recognizes case, punctuation and camelCase variants of qualified identifiers', () => {

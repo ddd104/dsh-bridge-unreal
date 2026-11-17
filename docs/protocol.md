@@ -36,7 +36,6 @@ Remote `unrealBridge.state(agent)`、`bind(agent, editorId)` 与 `unreal_state` 
 | `unreal_mcp_call_toolset` | `toolsetName`、`toolName`、`arguments`、UUID `requestId`；`toolName` 接受短名或当前工具集完整名，参数预检通过后调用 |
 | `unreal_mcp_call` | `name`、`arguments`、UUID `requestId`，默认直接调用顶层 MCP 工具 |
 | `unreal_data_table_copy_property` | `assetPath`、`sourceRow`、`propertyName`、UUID `requestId`，可选 `targetRows`；原生深复制指定字段，验证并回滚，不保存 |
-| `unreal_data_table_patch` | `assetPath`、`operations`、UUID `requestId`，可选 `rows`、`dryRun`（默认 true）；批量预览或修改行内字段，支持 `set` 标量叶子及 `copy` 原生深复制，不保存 |
 | `unreal_read_blueprint` | `assetPath`，可选 `graph`、`nodeIds`、`detail: summary/full` |
 | `unreal_level_blueprint` | `mapPath`，只读定位地图内的关卡蓝图，返回 `blueprint:{refPath}`、`graphs`、`mapPath` 和 `saveTarget:{refPath}`，供 MCP 图工具使用 |
 | `unreal_focus_asset` | `assetPath`，可选 `graph`、`nodeIds`；对已加载且受支持的真实资产或图引用排队展示，保留关卡子对象路径；不打开地图，需 `safe_asset_presentation` 能力 |
@@ -109,11 +108,15 @@ BlueprintTools 与 ObjectTools 调用另需 `mcp_operation_context` 能力，`un
 
 ### DataTable 写入与宿主错误恢复
 
-`data_table_patch` 能力启用行内字段批次编辑，需要同时更新 DSH 和 UE 插件。`rows` 省略表示全部行；`operations` 为 1–64 项 `set` 或 `copy`。`path`、`sourcePath` 使用字符串数组，可穿过结构字段、已有 Map 键（含枚举键）及数组下标，接受精确反射字段名及 `get_rows` 返回的 JSON 别名。`set` 修改数值、布尔、字符串、名称或枚举等标量叶子；`copy` 从同一行或显式 `sourceRow` 的原始值深复制类型匹配的字段，所有源值都取自本批操作开始前。
+DSH 0.6.3 / UE 0.5.3 新增 `unreal_data_table_add_rows`（固定 `mode:add`，`values` 可省略以使用新行默认值）、`unreal_data_table_rename_row`、`unreal_data_table_rename_rows`、`unreal_data_table_delete_rows`、`unreal_data_table_duplicate_rows`、`unreal_data_table_clear`。写入现有行继续使用 `unreal_data_table_write_rows`；已有行不接受空 `values`。
 
-先使用默认 `dryRun:true` 预览，再换新 UUID 并指定 `dryRun:false` 提交。完整批次预检、验证全部行、失败回滚，实际修改支持 UE 撤销且不自动保存。复杂结构及容器不通过整表 JSON 回写。缺少能力时返回需要更新 UE 插件的错误。
+除 add 复用 `data_table_write_rows` 外，行管理工具共用原生 `data_table_manage_rows` 能力和请求。参数为 `assetPath`、`dryRun`（默认 true）、`action`，以及以下对应字段：`rename` 使用 `renames:[{rowName,newRowName}]`；`delete` 使用 `rows:[name,...]`；`duplicate` 使用 `copies:[{sourceRow,newRowName}]`；`clear` 不接收行选择参数。宿主单行改名包装成一个 renames 条目。请求 UUID 位于协议信封；每批最多 4096 条，每个行名最多 1023 字符，遵循 UE FName 校验及忽略大小写的唯一性。clear 是独立的显式操作，不将缺少 rows 的删除请求解释为清空。
 
-示例操作：`{"op":"copy","path":["ColorTypeMaterialParams","Green"],"sourcePath":["ColorTypeMaterialParams","Blue"]}`，表示每行的 Green 字段取该行原有 Blue 字段的值。
+改名同时解析原始源行，允许交换和循环，禁止占用未参与改名的行；复制只能引用批次前已存在的行，目标必须全新。保留未涉及行及顺序，复制行按请求顺序追加。仅大小写的改名用原生自定义事务保留显示名称的撤销/重做。默认预览和 no-op 不修改 dirty 状态，不产生事务；提交先暂存并核验整表，再一次性通知编辑器，通知干扰触发内存回滚。返回 `action/targetCount/changedRows/renamedRows/deletedRows/duplicatedRows/rowCountBefore/rowCountAfter/verified/dryRun/saved/dirtyBefore/dirtyAfter`，`saved:false`。外部行名引用不自动改写。
+
+`data_table_patch_containers` 在既有 patch 基础上扩展 `set` 为 JSON 类型化写入（结构/Map 合并、数组整体替换、null 清空对象引用），并新增 `remove` 删除路径指向的现有 Map 项或动态数组元素。数组下标按操作顺序解释；固定结构字段和固定数组不可删除。复制源继续使用批次前快照。宿主在发送复合值前拒绝大小写冲突字段及超限深度/条目，旧编辑器缺少该能力时明确拒绝。复合值遵循 write_rows 的反射类型约束。
+
+新操作沿用写权限、编辑器占用、请求去重、结果未知恢复、修复预算和回滚失败写锁；预览回包必须 `verified:true,dryRun:true`，提交及恢复回包必须 `verified:true,dryRun:false`。不开放旧 MCP 的有损 `add_rows/set_rows/rename_rows` 实现，拦截提示指向对应原生工具。已有 `create/import_file/get_schema/list_rows/get_rows/search_row_structs` 保持可用，文件导入与整表资产管理不获得原生行批次的回滚承诺。
 
 `data_table_copy_property` 能力启用原生字段复制请求。`sourceRow` 与目标行名最长 1024 字符，`propertyName` 为最多 160 字符的精确反射属性名；`targetRows` 省略时选择除源行外所有行，显式数组必须非空、无重复、不含源行，最多 4096 行。预检无效参数不会写入资产。操作在 GameThread 内以单次事务深复制字段，验证源行、目标字段、其他字段和行集合，失败恢复内存快照及原始 dirty 状态。成功返回 `assetPath/sourceRow/propertyName/targetCount/changedRows/unchangedRows/verified/saved/dirtyBefore/dirtyAfter`；`verified:true`、`saved:false`。不触发窗口聚焦。
 
@@ -213,9 +216,17 @@ MCP 编辑在成功结果返回前，根据目标蓝图的图差异进行自动�
 
 host 监听 `ws://127.0.0.1:<port>/editor`。UE 从本地描述文件读取地址和令牌，在握手中提供 `Authorization: Bearer <token>`。允许 UE 原生客户端的回环 Origin；非回环来源被拒绝。浏览器 WebSocket 接口不能设置必需的 Authorization 头。
 
-UE 首包 `hello` 包含 `protocol:1`、随机的进程生命周期 `editorId`、`project`、`projectPath`、`engineVersion`、`pid`、`capabilities`。host 返回 `hello_ack`。UE 推送 `{type:event,event,sequence,data}`；sequence 在每次重连时从零开始，旧序号被忽略。事件包括 `selection_changed`、`blueprint_changed` 与 `runtime_changed`。
+UE 首包 `hello` 包含 `protocol:1`、随机的进程生命周期 `editorId`、`project`、`projectPath`、`engineVersion`、`pid`、`capabilities`。host 返回 `hello_ack`。UE 推送 `{type:event,event,sequence,data}`；sequence 在每次重连时从零开始，旧序号被忽略。事件包括 `asset_candidates_changed`、`selection_changed`、`blueprint_changed` 与 `runtime_changed`。
 
-`selection_changed.data.assets` 与 `unreal_state.selection` 表示最近操作的选区，最多 256 项。Content Browser 项保持 `{path,class}` 格式（也接受 `kind:"asset"`），兼容旧 UE 插件。支持 `level_selection` 的 UE 插件还会发送 `kind:"actor"` 或 `kind:"component"`，包含 `path`、`class`、`name`、`label`、`worldPath` 和可选的 `blueprintPath`。组件额外包含 `ownerPath`、`ownerLabel` 和可选的 `ownerBlueprintPath`。关卡项的 `path` 是活实例对象路径（可含 `:PersistentLevel`），不能作为蓝图资产路径传给图工具。选中组件时不重复发送其所属 Actor；清空关卡选区发送空数组，不回退到先前 Content Browser 选区。UE 在下一次桥接 tick 合并选择事件，重连后重新发送当前缓存。资产编辑器预览世界的 Actor 不属于关卡选区。
+DSH 0.6.4 / UE 0.5.4 新增 `manual_asset_candidates` 能力。`asset_candidates_changed.data` 为 `{revision,assets:[{kind:"asset",path,class}]}`，最多 256 项，只通过 Content Browser 右键“添加到 DSH”显式追加，按路径去重并保持加入顺序。整批无效或超限不添加任何项。普通浏览、选择、打开文件不添加候选；资产重命名/删除由 AssetRegistry 事件更新列表。候选按 UE 进程 editorId 维护，同一编辑器的多个对话共享；断线保留、同进程重连重发，完整 UE 重启产生新 editorId 和空列表。宿主忽略较旧 revision，离线数据仅作历史元数据展示。
+
+新模式的 `unreal_state.selectionMode` 为 `manual_assets`，`selection` 返回候选，`assetCandidates` 返回 `{revision,assets}`，`liveSelection` 独立返回实时 Actor/组件。首次候选快照到达前 `assetCandidates` 为 null。未声明能力的旧 UE 使用 `selectionMode:"live"`，仍由 `selection_changed.data.assets` 填充 `selection`，接受旧资产 `{path,class}`（也接受 `kind:"asset"`）；新模式过滤该事件中的资产项，不允许实时事件覆盖候选。
+
+`selection_changed.data.assets` 表示最近操作的实时对象，最多 256 项。支持 `level_selection` 的 UE 插件发送 `kind:"actor"` 或 `kind:"component"`，包含 `path`、`class`、`name`、`label`、`worldPath` 和可选的 `blueprintPath`。组件额外包含 `ownerPath`、`ownerLabel` 和可选的 `ownerBlueprintPath`。关卡项的 `path` 是活实例对象路径（可含 `:PersistentLevel`），不能作为蓝图资产路径传给图工具。选中组件时不重复发送其所属 Actor；清空关卡选区发送空数组。新模式选择 Content Browser 资产或蓝图 Actor 根项时清空实时上下文，不改变候选。UE 在下一次桥接 tick 合并选择事件，重连后重新发送当前缓存。资产编辑器预览世界的 Actor 不属于关卡选区。
+
+候选管理使用 `asset_candidates_edit` 请求：`{action:"remove",revision,paths:[...]}` 或 `{action:"clear",revision}`，拒绝额外字段；revision 为非负安全整数，remove 必须提供 1–256 个非空路径。revision 必须与 UE 当前列表精确一致，否则返回 `CANDIDATES_CHANGED`，保护显示列表之后新加的资产。仅实际变化递增 revision；重复添加、空列表清空均为 no-op。返回最新完整候选快照，并广播变化。此请求只管理上下文，不修改/保存资产，不占资产写锁，不受 `allowWrites` 限制。
+
+DSH 面板通过 agent-scoped Remote `editAssetCandidates(sessionId,{editorId,revision,action,paths?})` 调用，宿主在派发前及回包后校验当前对话绑定、连接和能力；UI 切换对话后忽略旧回包。未提供模型可调用的自动添加入口；候选存在不代表获准批量修改全部候选。
 
 PIE 选区在原 Actor/组件结构上附加 `runtime:{playSessionId,worldId,objectId,pieInstance,netMode,status}`。`netMode` 为 `standalone`、`client`、`listen_server` 或 `dedicated_server`，选区中的 `status` 为 `running` 或 `paused`。身份由运行、世界和对象三个不透明编号组成，`path` 仅用于展示与辅助分析。`unreal_state.runtime` 为当前编辑器的 `{playSessionId:string|null,status:running|paused|stopped,isSimulating:boolean}`，未绑定或离线时为 null；`runtimeSnapshots` 为当前对话保留的快照摘要。旧插件不发送 runtime 字段时，编辑世界选区继续按原格式显示。
 
@@ -223,7 +234,7 @@ PIE 选区在原 Actor/组件结构上附加 `runtime:{playSessionId,worldId,obj
 
 命令格式：`{type:request,protocol:1,id,method,params}`。响应格式：`{type:response,id,ok:true,result}` 或 `{type:response,id,ok:false,error:{code,message}}`。引擎线程队列每帧处理有限请求，重连会丢弃旧连接排队消息。所有 UObject 读写在游戏线程执行。
 
-`blueprint_component_selection` 能力使用同一个选区事件，蓝图编辑器组件项为 `kind:"component",source:"blueprint_editor"`，包含 `path`（模板对象路径）、`class`、`name`、`label`、`componentVariableName`、`ownerLabel`、`ownerBlueprintPath`、`isInherited`，以及可选的组件类 `blueprintPath`。该项没有 `worldPath` 或 `ownerPath`；修改组件默认值应在 `ownerBlueprintPath` 中解析目标，继承组件不能直接按父类模板路径修改父资产。选择 Actor 根项时发送普通蓝图资产项；关闭当前蓝图清空选区，关闭旧蓝图不覆盖之后选中的 Content 或关卡对象。监听通过 UE 5.8 的 Blueprint Selection Notifier 注册，不替换蓝图编辑器已有的组件选择回调。
+`blueprint_component_selection` 能力使用同一个选区事件，蓝图编辑器组件项为 `kind:"component",source:"blueprint_editor"`，包含 `path`（模板对象路径）、`class`、`name`、`label`、`componentVariableName`、`ownerLabel`、`ownerBlueprintPath`、`isInherited`，以及可选的组件类 `blueprintPath`。该项没有 `worldPath` 或 `ownerPath`；修改组件默认值应在 `ownerBlueprintPath` 中解析目标，继承组件不能直接按父类模板路径修改父资产。新模式选择 Actor 根项或关闭当前蓝图时清空实时组件选区，不自动添加蓝图资产、不改变候选；关闭旧蓝图不覆盖之后选中的关卡对象。旧 UE 仍可能发送根项蓝图资产。监听通过 UE 5.8 的 Blueprint Selection Notifier 注册，不替换蓝图编辑器已有的组件选择回调。
 
 写入以 UUID 去重。编辑器保留最多 10000 个写入参数摘要和最近 1024 个完整结果，达到日志上限时拒绝写入。DSH 缓存已完成结果，并在已派发写入超时/断线/取消后标记结果未知，阻止原对话及原 editorId 上其他对话继续写入，直到查到原始结果；已知派发前拒绝不进入未知状态。日志是进程内日志，重启编辑器会丢失；连接重试不重放写入。
 

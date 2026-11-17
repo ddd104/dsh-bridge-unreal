@@ -28,6 +28,24 @@ async function fixture(t,config={}){
 }
 const callArgs=()=>({toolsetName:'editor_toolset.toolsets.data_table.DataTableTools',toolName:'get_schema',arguments:{},requestId:randomUUID()});
 
+test('DataTable lifecycle tools expose strict schemas and dispatch the correct native action',async t=>{
+  const f=await fixture(t);
+  const calls=[];
+  f.bridge.manageDataTableRows=async(session,args)=>{calls.push({session,args});return {verified:true,dryRun:args.dryRun,saved:false};};
+  for(const [name,fields,expected] of [
+    ['rename_row',{rowName:'Car',newRowName:'Bus'},{action:'rename',renames:[{rowName:'Car',newRowName:'Bus'}]}],
+    ['rename_rows',{renames:[{rowName:'Car',newRowName:'Bus'}]},{action:'rename',renames:[{rowName:'Car',newRowName:'Bus'}]}],
+    ['delete_rows',{rows:['Car']},{action:'delete',rows:['Car']}],
+    ['duplicate_rows',{copies:[{sourceRow:'Car',newRowName:'Copy'}]},{action:'duplicate',copies:[{sourceRow:'Car',newRowName:'Copy'}]}],
+    ['clear',{}, {action:'clear'}],
+  ]){
+    const args={assetPath:'/Game/Table',...fields,requestId:randomUUID()};
+    const result=await f.execute('unreal_data_table_'+name,args);
+    assert.equal(result.ok,true,JSON.stringify(result));
+    assert.deepEqual(calls.at(-1),{session:'chat',args:{assetPath:args.assetPath,requestId:args.requestId,dryRun:true,...expected}});
+  }
+});
+
 test('invalid advertised MCP parameters return a corrective error without dispatch or cancellation',async t=>{
   const f=await fixture(t);let dispatched=0;
   f.bridge.mcpCallToolset=async()=>{dispatched++;return {found:true};};

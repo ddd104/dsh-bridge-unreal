@@ -1,6 +1,7 @@
 import {z} from 'zod';
+import {dataTableAddRowsSchema,dataTableRenameRowsSchema,dataTableRenameRowSchema,dataTableDeleteRowsSchema,dataTableDuplicateRowsSchema,dataTableClearSchema} from './protocol.mjs';
 import {UnrealBridge} from './bridge.mjs';
-import {id,assetPath,patchSchema,createSchema,readSchema,focusSchema,catalogSchema,knowledgeSchema,knowledgeRecordSchema,mcpDescribeSchema,mcpCallSchema,mcpToolsetCallSchema,dataTableCopySchema,dataTablePatchSchema,runtimeSnapshotSchema,runtimeHistorySchema,jsonSchema,fail,errorResult} from './protocol.mjs';
+import {id,assetPath,patchSchema,createSchema,readSchema,focusSchema,catalogSchema,knowledgeSchema,knowledgeRecordSchema,mcpDescribeSchema,mcpCallSchema,mcpToolsetCallSchema,dataTableCopySchema,dataTablePatchSchema,dataTableWriteRowsSchema,runtimeSnapshotSchema,runtimeHistorySchema,jsonSchema,fail,errorResult} from './protocol.mjs';
 import {TYPERT} from './remote.mjs';
 import {writeFile} from 'node:fs/promises';
 import {VisualService} from './visual.mjs';
@@ -57,7 +58,7 @@ export async function apply(ctx,raw={}) {
   bridge.on('diagnostic',message=>ctx.logger?.warn?.(`[Unreal Bridge] ${message}`));
   try{await bridge.start();}catch(error){await bridge.close();throw error;} ctx.effect(()=>()=>bridge.close(),'Unreal bridge lifetime');
   cache.start();
-  const remote={ctx,bridge,state:agent=>state(sessionOf(agent)),bind:(agent,editorId)=>{const session=sessionOf(agent);bridge.bind(session,editorId);return state(session);},cacheStatus:()=>cache.status(),cacheCleanup:options=>cache.cleanup(options)};
+  const remote={ctx,bridge,state:agent=>state(sessionOf(agent)),bind:(agent,editorId)=>{const session=sessionOf(agent);bridge.bind(session,editorId);return state(session);},editAssetCandidates:async(agent,options)=>{const session=sessionOf(agent);await bridge.editAssetCandidates(session,options);return state(session);},cacheStatus:()=>cache.status(),cacheCleanup:options=>cache.cleanup(options)};
   remote.typertRemote=Object.freeze({service:remote,serviceKey:'unrealBridge',namespace:'unrealBridge'});
   ctx.provide('unrealBridge',remote);
   ctx.inject?.(['skills','fs'],skillCtx=>{
@@ -151,7 +152,7 @@ export async function apply(ctx,raw={}) {
     const result=await visual.compare(s,a,e);
     return visual.withEvidence(result,()=>prepareVisualOutput(outputContext,e,result,[{path:result.evidence.comparison,label:'参考图（左）与当前 UE 截图（右）'},...(result.evidence.heatmapPreview?[{path:result.evidence.heatmapPreview,label:'色差热图：黑色表示无差异，红黄表示差异增大'}]:[])]));
   });
-  tool('unreal_catalog','Search loaded native blueprint functions and read their exact pin definitions. Omit query for common functions.',catalogSchema,async(a,_e,s)=>bridge.catalog(s,a));
+  tool('unreal_catalog','Search loaded native Blueprint functions and read their exact pin definitions. Omit query for common functions. For Make Struct, Make Array, variables and generic array operations, discover BlueprintTools.find_node_types through unreal_mcp_describe.',catalogSchema,async(a,_e,s)=>bridge.catalog(s,a));
   tool('unreal_knowledge','Query project status, graph and document context, cited source, or paged UE asset snapshots from the bound editor. Read-only project evidence.',knowledgeSchema,async(a,e,s)=>bridge.knowledge(s,a,e.signal));
   tool('unreal_knowledge_record','Save a sourced inference or reusable planning experience in the bound project cache under the configured approval policy. Use only for conclusions worth retaining.',knowledgeRecordSchema,async(a,e,s)=>{await approve(e,`保存项目知识：${a.tool}`);return bridge.knowledgeRecord(s,a,e.signal);},true);
   tool('unreal_mcp_tools','List top-level UE 5.8 MCP tools and their input schemas for this editor.',z.object({}).strict(),async(_a,e,s)=>bridge.mcpTools(s,e.signal));
@@ -160,7 +161,24 @@ export async function apply(ctx,raw={}) {
   tool('unreal_mcp_call','Call a discovered UE 5.8 MCP tool directly in the bound editor without an approval prompt. Supply the exact name, arguments and requestId.',mcpCallSchema,async(a,e,s,admit)=>bridge.mcpCall(s,a,e.signal,admit),true);
   tool('unreal_mcp_call_toolset','Call a discovered UE 5.8 toolset function directly in the bound editor without an approval prompt. Supply the full toolsetName, function short name in toolName, and arguments matching its current discovered schema.',mcpToolsetCallSchema,async(a,e,s,admit)=>bridge.mcpCallToolset(s,a,e.signal,admit),true);
   tool('unreal_data_table_copy_property','Copy one reflected DataTable property from sourceRow to targetRows (omit for all other rows). Atomic native deep copy, verified rollback, no JSON round trip, no save or desktop input.',dataTableCopySchema,async(a,e,s)=>{await approve(e,`复制 DataTable 字段：${a.assetPath}\n${a.sourceRow} → ${a.targetRows?.join(', ')??'其他所有行'}\n${a.propertyName}`);return bridge.copyDataTableProperty(s,a,e.signal);},true);
-  tool('unreal_data_table_patch','Preview/apply atomic DataTable row edits. Paths traverse existing struct fields, map keys (including enums) and array indices. set edits a scalar leaf; copy deep-copies a matching field from original sourcePath in the same row (or sourceRow). Omit rows for all rows. Example: copy path ["ColorTypeMaterialParams","Green"] from sourcePath ["ColorTypeMaterialParams","Blue"]. Defaults to dryRun=true; use a new requestId and dryRun=false to apply. Verifies every row and rolls back failures; never saves.',dataTablePatchSchema,async(a,e,s)=>{
+  tool('unreal_data_table_add_rows','Add DataTable rows: rows:[{rowName,values?}]. Omit values for struct defaults. Existing names fail the whole batch. Preview defaults to dryRun=true; commit with false and a new requestId. Native, atomic, undoable, never saves.',dataTableAddRowsSchema,async(a,e,s)=>{
+    if(!a.dryRun)await approve(e,`新增 DataTable 行：${a.assetPath}\n${a.rows.length} 行；不保存`);
+    return bridge.addDataTableRows(s,a,e.signal);
+  },true);
+  const rowManagement=(name,description,schema,action,convert=a=>a)=>tool(name,description+' Requires data_table_manage_rows. Defaults to dryRun=true; commit with false and a new requestId. Atomic native snapshots, verified rollback and undo/redo; never saves.',schema,async(a,e,s)=>{
+    if(!a.dryRun)await approve(e,`修改 DataTable 行：${a.assetPath}\n${action}；不保存`);
+    return bridge.manageDataTableRows(s,{...convert(a),action},e.signal);
+  },true);
+  rowManagement('unreal_data_table_rename_rows','Rename rows simultaneously with renames:[{rowName,newRowName}]. Supports swaps, cycles and case-only changes; rejects duplicate sources/destinations and collisions with untouched rows. Preserves row contents and order. External row-name references are not rewritten.',dataTableRenameRowsSchema,'rename');
+  rowManagement('unreal_data_table_rename_row','Rename one row using rowName/newRowName. External row-name references are not rewritten.',dataTableRenameRowSchema,'rename',({rowName,newRowName,...a})=>({...a,renames:[{rowName,newRowName}]}));
+  rowManagement('unreal_data_table_delete_rows','Delete explicitly named rows:[name,...]. Missing or duplicate names reject the entire batch. Other rows retain their contents and order. External row-name references are not rewritten.',dataTableDeleteRowsSchema,'delete');
+  rowManagement('unreal_data_table_duplicate_rows','Deep-copy complete original rows to new names with copies:[{sourceRow,newRowName}]. Can copy one source to several new rows. Targets must not exist; copied values retain their native types and precision.',dataTableDuplicateRowsSchema,'duplicate');
+  rowManagement('unreal_data_table_clear','Explicitly remove every row while retaining the DataTable asset and row schema. Empty tables are a no-op. External row-name references are not rewritten.',dataTableClearSchema,'clear');
+  tool('unreal_data_table_write_rows','Preview/apply individual DataTable rows with distinct values. mode: update (default, existing rows only), add (new rows only), upsert (either). rows: [{rowName,values}]. Structs/maps merge supplied fields/keys; supplied arrays replace that array. Unspecified fields/rows remain unchanged; new rows use struct defaults. Read get_schema first. Supports scalar values, text, enum identifiers, nested structs/maps/arrays and object references (path, {refPath}, or null). Defaults to dryRun=true; apply with dryRun=false and a new requestId. Atomic, verified, undoable; never saves.',dataTableWriteRowsSchema,async(a,e,s)=>{
+    if(!a.dryRun)await approve(e,`写入 DataTable 行：${a.assetPath}\n${a.rows.length} 行；不保存`);
+    return bridge.writeDataTableRows(s,a,e.signal);
+  },true);
+  tool('unreal_data_table_patch','Preview/apply atomic DataTable row edits. Paths traverse existing struct fields, map keys (including enums) and array indices. set writes typed values (structs/maps merge, arrays replace, null clears object references); remove deletes an existing map entry or dynamic array element in operation order; copy deep-copies a matching field from original sourcePath in the same row (or sourceRow). Omit rows for all rows. Example: copy path ["ColorTypeMaterialParams","Green"] from sourcePath ["ColorTypeMaterialParams","Blue"]. Defaults to dryRun=true; use a new requestId and dryRun=false to apply. Verifies every row and rolls back failures; never saves.',dataTablePatchSchema,async(a,e,s)=>{
     if(!a.dryRun)await approve(e,`修改 DataTable 字段：${a.assetPath}\n${a.operations.length} 项操作；不保存`);
     return bridge.patchDataTable(s,a,e.signal);
   },true);
@@ -172,7 +190,7 @@ export async function apply(ctx,raw={}) {
   tool('unreal_read_blueprint','Read a blueprint summary or a graph with exact node IDs and pin names.',readSchema,async(a,e,s)=>bridge.read(s,a,e.signal));
   tool('unreal_level_blueprint','Resolve an existing level Blueprint from a map without creating it or changing levels. Returns exact Blueprint and graph references for MCP tools; requires level_blueprint_lookup.',levelBlueprintSchema,async(a,e,s)=>bridge.levelBlueprint(s,a,e.signal));
   tool('unreal_focus_asset','Open and maximize an asset editor; optionally focus a graph and its nodes. Asset edits already do this automatically.',focusSchema,async(a,e,s)=>bridge.focus(s,a,e.signal));
-  tool('unreal_preview_patch','Validate a node patch against the base revision on a transient copy; returns previewId.',patchSchema,async(a,e,s)=>bridge.preview(s,'patch',a,e.signal));
+  tool('unreal_preview_patch','Validate a native function/event node patch against the base revision on a transient copy; returns previewId. For Make Struct, Make Array, local/member variables and generic array operations, discover BlueprintTools with unreal_mcp_describe and use unreal_mcp_call_toolset.',patchSchema,async(a,e,s)=>bridge.preview(s,'patch',a,e.signal));
   tool('unreal_preview_create','Preview creation of a new blueprint; existing assets are rejected.',createSchema,async(a,e,s)=>bridge.preview(s,'create',a,e.signal));
   tool('unreal_apply','Apply an exact validated preview under the configured approval policy. Does not save. Keep requestId for status queries.',z.object({previewId:id,requestId:z.string().uuid()}).strict(),async(a,e,s)=>{const p=bridge.previewRecord(s,a.previewId);await approve(e,`Unreal ${p.kind}: ${p.params.assetPath}\n${JSON.stringify(p.params)}`);return bridge.apply(s,a.previewId,a.requestId,e.signal);},true);
   tool('unreal_request_status','Recover the result of a timed-out request without repeating a write.',z.object({requestId:z.string().uuid()}).strict(),async(a,_e,s)=>bridge.requestStatus(s,a.requestId));

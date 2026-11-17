@@ -5,6 +5,8 @@
 #include "Editor.h"
 #include "Misc/AutomationTest.h"
 #include "Misc/PackageName.h"
+#include "Serialization/JsonReader.h"
+#include "Serialization/JsonSerializer.h"
 #include "UObject/Package.h"
 #include "UObject/StrongObjectPtr.h"
 #include "UObject/StructOnScope.h"
@@ -307,6 +309,291 @@ bool FDSHDataTablePatchRollback::RunTest(const FString&)
     TestEqual(TEXT("Rollback verified"), Details->GetStringField(TEXT("rollback")), FString(TEXT("restored")));
     TestTrue(TEXT("Original fully restored"), SameRow(Fixture.Get(TEXT("Car")), Original));
     TestFalse(TEXT("Dirty state restored"), Fixture.Table->GetOutermost()->IsDirty());
+    return true;
+}
+namespace
+{
+TSharedPtr<FJsonObject> WriteParams(const FTableFixture& Fixture, const TCHAR* Json)
+{
+    TSharedPtr<FJsonObject> Params;
+    FJsonSerializer::Deserialize(TJsonReaderFactory<>::Create(Json), Params);
+    check(Params);
+    Params->SetStringField(TEXT("assetPath"), Fixture.Path);
+    return Params;
+}
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FDSHDataTableWriteRowsPreservation, "DSH.Bridge.DataTableWriteRows.Preservation",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FDSHDataTableWriteRowsPreservation::RunTest(const FString&)
+{
+    FTableFixture Fixture;
+    const auto Original = *Fixture.Get(TEXT("Car"));
+    const auto Other = *Fixture.Get(TEXT("Predestrian"));
+    auto Expected = Original;
+    Expected.Label = TEXT("Sedan");
+    Expected.ColorTypeMaterialParams[EDSHDataTableTestColor::Green].Colors[TEXT("Warning")].R = 0.9f;
+    Expected.FloatParameters.Add(TEXT("Speed"), 55);
+    Expected.RenderTargetColors[TEXT("Body")].Samples = {FVector(1, 2, 3), FVector(4, 5, 6)};
+    auto Params = WriteParams(Fixture, TEXT(R"({"rows":[
+        {"rowName":"Car","values":{"label":"Sedan","colorTypeMaterialParams":{"Green":{"colors":{"Warning":{"r":0.9}}}},"FloatParameters":{"Speed":55},"RenderTargetColors":{"Body":{"Samples":[{"X":1,"Y":2,"Z":3},{"X":4,"Y":5,"Z":6}]}}}},
+        {"rowName":"Bus","values":{"Label":"Coach"}}]})"));
+    FString Code, Error; TSharedPtr<FJsonObject> Details;
+    auto Result = FDSHDataTableOps::WriteRows(Params, Code, Error, Details);
+    TestTrue(TEXT("Preview succeeds"), Result.IsValid());
+    TestTrue(TEXT("Preview preserves row"), SameRow(Fixture.Get(TEXT("Car")), Original));
+    TestFalse(TEXT("Preview preserves clean package"), Fixture.Table->GetOutermost()->IsDirty());
+    Params->SetBoolField(TEXT("dryRun"), false);
+    Result = FDSHDataTableOps::WriteRows(Params, Code, Error, Details);
+    if (!TestTrue(*Error, Result.IsValid())) return false;
+    TestTrue(TEXT("All unspecified native fields and map entries preserved"), SameRow(Fixture.Get(TEXT("Car")), Expected));
+    TestEqual(TEXT("Each row gets its own values"), Fixture.Get(TEXT("Bus"))->Label, FString(TEXT("Coach")));
+    TestTrue(TEXT("Untargeted row preserved"), SameRow(Fixture.Get(TEXT("Predestrian")), Other));
+    TestTrue(TEXT("Commit marks package dirty"), Fixture.Table->GetOutermost()->IsDirty());
+    TestFalse(TEXT("Never saves"), Result->GetBoolField(TEXT("saved")));
+    Result = FDSHDataTableOps::WriteRows(Params, Code, Error, Details);
+    TestTrue(TEXT("Idempotent contents"), Result && Result->GetNumberField(TEXT("changedRows")) == 0);
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FDSHDataTableWriteRowsValidation, "DSH.Bridge.DataTableWriteRows.Validation",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FDSHDataTableWriteRowsValidation::RunTest(const FString&)
+{
+    FTableFixture Fixture;
+    const auto Original = *Fixture.Get(TEXT("Car"));
+    FString Code, Error; TSharedPtr<FJsonObject> Details;
+    for (const TCHAR* Json : {
+        TEXT(R"({"mode":"update","rows":[{"rowName":"Missing","values":{"Label":"New"}}]})"),
+        TEXT(R"({"mode":"add","rows":[{"rowName":"Car","values":{"Label":"New"}}]})"),
+        TEXT(R"({"rows":[{"rowName":"Car","values":{"Label":"First"}},{"rowName":"car","values":{"Label":"Second"}}]})"),
+        TEXT(R"({"mode":"upsert","rows":[{"rowName":"New","values":{"Label":"New"}},{"rowName":"Car","values":{"BadField":42}}]})"),
+        TEXT(R"({"rows":[{"rowName":"Car","values":{"Sentinels":[1.5,2]}}]})"),
+        TEXT(R"({"rows":[{"rowName":"Car","values":{"ColorTypeMaterialParams":{"Invalid":{"Colors":{}}}}}]})"),
+        TEXT(R"({"rows":[{"rowName":"Car","values":{"FloatParameters":{"Speed":"fast"}}}]})"),
+        TEXT(R"({"rows":[{"rowName":"Car","values":{"AnimToPlay":"not-an-object-path"}}]})")})
+    {
+        auto Params = WriteParams(Fixture, Json); Params->SetBoolField(TEXT("dryRun"), false);
+        if (!TestFalse(Json, FDSHDataTableOps::WriteRows(Params, Code, Error, Details).IsValid())) return false;
+        TestTrue(TEXT("Rejected batch preserves row"), SameRow(Fixture.Get(TEXT("Car")), Original));
+        TestEqual(TEXT("No partial additions"), Fixture.Table->GetRowMap().Num(), 4);
+        TestFalse(TEXT("Rejected batch preserves dirty state"), Fixture.Table->GetOutermost()->IsDirty());
+    }
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FDSHDataTableWriteRowsAddUndo, "DSH.Bridge.DataTableWriteRows.AddUndo",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FDSHDataTableWriteRowsAddUndo::RunTest(const FString&)
+{
+    FTableFixture Fixture;
+    const auto Original = *Fixture.Get(TEXT("Car"));
+    auto Params = WriteParams(Fixture, TEXT(R"({"mode":"upsert","dryRun":false,"rows":[
+        {"rowName":"Car","values":{"Label":"Updated","AnimToPlay":null}},
+        {"rowName":"Truck","values":{"Label":"New","ColorTypeMaterialParams":{"Blue":{"Colors":{"Paint":{"R":0.5,"A":1}}}},"AnimToPlay":{"refPath":"/Game/Fixture/Anim_New.Anim_New"}}}]})"));
+    FString Code, Error; TSharedPtr<FJsonObject> Details;
+    auto Result = FDSHDataTableOps::WriteRows(Params, Code, Error, Details);
+    if (!TestTrue(*Error, Result.IsValid())) return false;
+    TestEqual(TEXT("Added one row"), Result->GetNumberField(TEXT("addedRows")), 1.0);
+    TestEqual(TEXT("Updated one row"), Result->GetNumberField(TEXT("updatedRows")), 1.0);
+    TestEqual(TEXT("Native defaults retained"), Fixture.Get(TEXT("Truck"))->Sentinels[0], 11);
+    TestEqual(TEXT("New enum map entry created"), Fixture.Get(TEXT("Truck"))->ColorTypeMaterialParams[EDSHDataTableTestColor::Blue].Colors[TEXT("Paint")].R, 0.5f);
+    TestTrue(TEXT("Explicit null clears reference"), Fixture.Get(TEXT("Car"))->AnimToPlay.IsNull());
+    TestEqual(TEXT("Soft path written without loading"), Fixture.Get(TEXT("Truck"))->AnimToPlay.ToSoftObjectPath().ToString(), FString(TEXT("/Game/Fixture/Anim_New.Anim_New")));
+    GEditor->UndoTransaction();
+    TestNull(TEXT("Undo removes new row"), Fixture.Get(TEXT("Truck")));
+    TestTrue(TEXT("Undo restores updated row"), SameRow(Fixture.Get(TEXT("Car")), Original));
+    GEditor->RedoTransaction();
+    TestNotNull(TEXT("Redo restores new row"), Fixture.Get(TEXT("Truck")));
+    TestEqual(TEXT("Redo restores update"), Fixture.Get(TEXT("Car"))->Label, FString(TEXT("Updated")));
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FDSHDataTableWriteRowsRollback, "DSH.Bridge.DataTableWriteRows.Rollback",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FDSHDataTableWriteRowsRollback::RunTest(const FString&)
+{
+    FTableFixture Fixture;
+    const auto Original = *Fixture.Get(TEXT("Car"));
+    const auto Names = Fixture.Table->GetRowNames();
+    const auto Handle = Fixture.Table->OnDataTableChanged().AddLambda([&]() { Fixture.Get(TEXT("Car"))->Label = TEXT("Corruption"); });
+    auto Params = WriteParams(Fixture, TEXT(R"({"mode":"upsert","dryRun":false,"rows":[{"rowName":"Truck","values":{"Label":"New"}},{"rowName":"Car","values":{"Label":"Updated"}}]})"));
+    FString Code, Error; TSharedPtr<FJsonObject> Details;
+    const auto Result = FDSHDataTableOps::WriteRows(Params, Code, Error, Details);
+    Fixture.Table->OnDataTableChanged().Remove(Handle);
+    TestFalse(TEXT("Callback corruption rejects commit"), Result.IsValid());
+    TestEqual(TEXT("Explicit verification failure"), Code, FString(TEXT("DATA_TABLE_VERIFICATION_FAILED")));
+    TestEqual(TEXT("Rollback verified"), Details->GetStringField(TEXT("rollback")), FString(TEXT("restored")));
+    TestTrue(TEXT("Original row restored"), SameRow(Fixture.Get(TEXT("Car")), Original));
+    TestTrue(TEXT("Row names and order restored"), Fixture.Table->GetRowNames() == Names);
+    TestFalse(TEXT("Dirty state restored"), Fixture.Table->GetOutermost()->IsDirty());
+    return true;
+}
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FDSHDataTableManageLifecycle, "DSH.Bridge.DataTableManage.Lifecycle",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FDSHDataTableManageLifecycle::RunTest(const FString&)
+{
+    FTableFixture Fixture;
+    FString Code, Error; TSharedPtr<FJsonObject> Details;
+    const auto Car = *Fixture.Get(TEXT("Car"));
+    const auto Names = Fixture.Table->GetRowNames();
+    auto Params = WriteParams(Fixture, TEXT(R"({"action":"duplicate","copies":[{"sourceRow":"Car","newRowName":"Copy1"},{"sourceRow":"Car","newRowName":"Copy2"}]})"));
+    auto Result = FDSHDataTableOps::ManageRows(Params, Code, Error, Details);
+    if (!TestTrue(*Error, Result.IsValid())) return false;
+    TestEqual(TEXT("Preview predicts copies"), Result->GetNumberField(TEXT("duplicatedRows")), 2.0);
+    TestTrue(TEXT("Preview preserves names/order"), Names == Fixture.Table->GetRowNames());
+    TestFalse(TEXT("Preview leaves package clean"), Fixture.Table->GetOutermost()->IsDirty());
+    Params->SetBoolField(TEXT("dryRun"), false);
+    Result = FDSHDataTableOps::ManageRows(Params, Code, Error, Details);
+    if (!TestTrue(*Error, Result.IsValid())) return false;
+    TestTrue(TEXT("Deep copy preserves every field"), SameRow(Fixture.Get(TEXT("Copy1")), Car) && SameRow(Fixture.Get(TEXT("Copy2")), Car));
+    Fixture.Get(TEXT("Copy1"))->FloatParameters[TEXT("Warning")] = 999;
+    TestTrue(TEXT("Copies own independent storage"), SameRow(Fixture.Get(TEXT("Car")), Car) && SameRow(Fixture.Get(TEXT("Copy2")), Car));
+    GEditor->UndoTransaction();
+    TestTrue(TEXT("Undo removes copies"), Names == Fixture.Table->GetRowNames());
+    GEditor->RedoTransaction();
+    TestNotNull(TEXT("Redo restores copies"), Fixture.Get(TEXT("Copy2")));
+    Result = FDSHDataTableOps::ManageRows(WriteParams(Fixture, TEXT(R"({"action":"delete","dryRun":false,"rows":["Copy1","Copy2"]})")), Code, Error, Details);
+    if (!TestTrue(*Error, Result.IsValid())) return false;
+    TestTrue(TEXT("Delete preserves original order and contents"), Names == Fixture.Table->GetRowNames() && SameRow(Fixture.Get(TEXT("Car")), Car));
+    Result = FDSHDataTableOps::ManageRows(WriteParams(Fixture, TEXT(R"({"action":"clear","dryRun":false})")), Code, Error, Details);
+    if (!TestTrue(*Error, Result.IsValid())) return false;
+    TestEqual(TEXT("Clear removes all rows"), Fixture.Table->GetRowMap().Num(), 0);
+    TestTrue(TEXT("Clear retains schema"), Fixture.Table->RowStruct == FDSHDataTableCopyTestRow::StaticStruct());
+    GEditor->UndoTransaction();
+    TestTrue(TEXT("Undo clear restores all original values/order"), Names == Fixture.Table->GetRowNames() && SameRow(Fixture.Get(TEXT("Car")), Car));
+    GEditor->RedoTransaction();
+    TestEqual(TEXT("Redo clear removes all rows"), Fixture.Table->GetRowMap().Num(), 0);
+    Fixture.Table->GetOutermost()->SetDirtyFlag(false);
+    Result = FDSHDataTableOps::ManageRows(WriteParams(Fixture, TEXT(R"({"action":"clear","dryRun":false})")), Code, Error, Details);
+    TestTrue(TEXT("Empty clear is a clean no-op"), Result.IsValid() && !Fixture.Table->GetOutermost()->IsDirty());
+    Result = FDSHDataTableOps::WriteRows(WriteParams(Fixture, TEXT(R"({"mode":"add","dryRun":false,"rows":[{"rowName":"Default","values":{}}]})")), Code, Error, Details);
+    if (!TestTrue(*Error, Result.IsValid())) return false;
+    const FDSHDataTableCopyTestRow Defaults;
+    TestTrue(TEXT("Empty values creates exact struct defaults"), SameRow(Fixture.Get(TEXT("Default")), Defaults));
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FDSHDataTableManageRename, "DSH.Bridge.DataTableManage.Rename",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FDSHDataTableManageRename::RunTest(const FString&)
+{
+    FTableFixture Fixture;
+    const auto Car = *Fixture.Get(TEXT("Car")), Bus = *Fixture.Get(TEXT("Bus")), Same = *Fixture.Get(TEXT("Same"));
+    const auto Names = Fixture.Table->GetRowNames();
+    FString Code, Error; TSharedPtr<FJsonObject> Details;
+    auto Result = FDSHDataTableOps::ManageRows(WriteParams(Fixture, TEXT(R"({"action":"rename","dryRun":false,"renames":[{"rowName":"Car","newRowName":"Bus"},{"rowName":"Bus","newRowName":"Same"},{"rowName":"Same","newRowName":"Car"}]})")), Code, Error, Details);
+    if (!TestTrue(*Error, Result.IsValid())) return false;
+    TestTrue(TEXT("Cycles use original contents"), SameRow(Fixture.Get(TEXT("Bus")), Car) && SameRow(Fixture.Get(TEXT("Same")), Bus) && SameRow(Fixture.Get(TEXT("Car")), Same));
+    TestEqual(TEXT("Renamed row retains its slot"), Fixture.Table->GetRowNames()[1], FName(TEXT("Bus")));
+    GEditor->UndoTransaction();
+    TestTrue(TEXT("Undo restores names/order/contents"), Names == Fixture.Table->GetRowNames() && SameRow(Fixture.Get(TEXT("Car")), Car));
+    GEditor->RedoTransaction();
+    TestTrue(TEXT("Redo restores cycle"), SameRow(Fixture.Get(TEXT("Bus")), Car));
+    Result = FDSHDataTableOps::ManageRows(WriteParams(Fixture, TEXT(R"({"action":"rename","dryRun":false,"renames":[{"rowName":"Bus","newRowName":"bUS"}]})")), Code, Error, Details);
+    if (!TestTrue(*Error, Result.IsValid())) return false;
+    TestEqual(TEXT("Case-only rename changes one row"), Result->GetNumberField(TEXT("changedRows")), 1.0);
+    TestTrue(TEXT("Case-only rename changes display name"), Fixture.Table->GetRowNames()[1].ToString().Equals(TEXT("bUS"), ESearchCase::CaseSensitive));
+    GEditor->UndoTransaction();
+    TestTrue(TEXT("Undo case-only rename"), Fixture.Table->GetRowNames()[1].ToString().Equals(TEXT("Bus"), ESearchCase::CaseSensitive));
+    GEditor->RedoTransaction();
+    TestTrue(TEXT("Redo case-only rename"), Fixture.Table->GetRowNames()[1].ToString().Equals(TEXT("bUS"), ESearchCase::CaseSensitive));
+    GEditor->UndoTransaction();
+    Fixture.Table->GetOutermost()->SetDirtyFlag(false);
+    Result = FDSHDataTableOps::ManageRows(WriteParams(Fixture, TEXT(R"({"action":"rename","dryRun":false,"renames":[{"rowName":"Bus","newRowName":"Bus"}]})")), Code, Error, Details);
+    TestTrue(TEXT("Same-name rename is a clean no-op"), Result.IsValid() && Result->GetNumberField(TEXT("changedRows")) == 0 && !Fixture.Table->GetOutermost()->IsDirty());
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FDSHDataTableManageValidation, "DSH.Bridge.DataTableManage.Validation",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FDSHDataTableManageValidation::RunTest(const FString&)
+{
+    FTableFixture Fixture;
+    const auto Car = *Fixture.Get(TEXT("Car")); const auto Names = Fixture.Table->GetRowNames();
+    FString Code, Error; TSharedPtr<FJsonObject> Details;
+    for (const TCHAR* Json : {
+        TEXT(R"({"action":"delete","rows":["Car","Missing"]})"),
+        TEXT(R"({"action":"delete","rows":["Car","car"]})"),
+        TEXT(R"({"action":"delete","rows":[]})"),
+        TEXT(R"({"action":"clear","rows":["Car"]})"),
+        TEXT(R"({"action":"rename","renames":[{"rowName":"Car","newRowName":"Bus"}]})"),
+        TEXT(R"({"action":"rename","renames":[{"rowName":"Car","newRowName":"A"},{"rowName":"car","newRowName":"B"}]})"),
+        TEXT(R"({"action":"rename","renames":[{"rowName":"Car","newRowName":"A"},{"rowName":"Bus","newRowName":"a"}]})"),
+        TEXT(R"({"action":"rename","renames":[{"rowName":"Car","newRowName":"None"}]})"),
+        TEXT(R"({"action":"duplicate","copies":[{"sourceRow":"Car","newRowName":"New"},{"sourceRow":"New","newRowName":"Other"}]})"),
+        TEXT(R"({"action":"duplicate","copies":[{"sourceRow":"Car","newRowName":"bus"}]})")})
+    {
+        auto Params = WriteParams(Fixture, Json); Params->SetBoolField(TEXT("dryRun"), false);
+        TestFalse(Json, FDSHDataTableOps::ManageRows(Params, Code, Error, Details).IsValid());
+        TestTrue(TEXT("Whole batch rejected without edits"), Names == Fixture.Table->GetRowNames() && SameRow(Fixture.Get(TEXT("Car")), Car));
+        TestFalse(TEXT("Rejected batch remains clean"), Fixture.Table->GetOutermost()->IsDirty());
+    }
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FDSHDataTableManageRollback, "DSH.Bridge.DataTableManage.Rollback",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FDSHDataTableManageRollback::RunTest(const FString&)
+{
+    for (const TCHAR* Json : {
+        TEXT(R"({"action":"rename","renames":[{"rowName":"Car","newRowName":"New"}]})"),
+        TEXT(R"({"action":"delete","rows":["Car"]})"),
+        TEXT(R"({"action":"duplicate","copies":[{"sourceRow":"Car","newRowName":"New"}]})"),
+        TEXT(R"({"action":"clear"})")})
+    {
+        FTableFixture Fixture;
+        Fixture.Get(TEXT("Car"))->Label = TEXT("Unsaved user edit"); Fixture.Table->GetOutermost()->SetDirtyFlag(true);
+        const auto Car = *Fixture.Get(TEXT("Car")); const auto Names = Fixture.Table->GetRowNames();
+        bool bInside = false;
+        const auto Handle = Fixture.Table->OnDataTableChanged().AddLambda([&]() {
+            if (bInside) return;
+            TGuardValue<bool> Guard(bInside, true);
+            Fixture.Table->AddRow(TEXT("Corruption"), FTableFixture::Row(99));
+        });
+        FString Code, Error; TSharedPtr<FJsonObject> Details;
+        auto Params = WriteParams(Fixture, Json); Params->SetBoolField(TEXT("dryRun"), false);
+        const auto Result = FDSHDataTableOps::ManageRows(Params, Code, Error, Details);
+        Fixture.Table->OnDataTableChanged().Remove(Handle);
+        TestFalse(TEXT("Listener corruption fails verification"), Result.IsValid());
+        TestEqual(TEXT("Explicit verification error"), Code, FString(TEXT("DATA_TABLE_VERIFICATION_FAILED")));
+        TestEqual(TEXT("Rollback verified"), Details->GetStringField(TEXT("rollback")), FString(TEXT("restored")));
+        TestTrue(TEXT("Unsaved edits and original order restored"), Names == Fixture.Table->GetRowNames() && SameRow(Fixture.Get(TEXT("Car")), Car));
+        TestTrue(TEXT("Existing dirty flag retained"), Fixture.Table->GetOutermost()->IsDirty());
+    }
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FDSHDataTablePatchContainers, "DSH.Bridge.DataTablePatch.Containers",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FDSHDataTablePatchContainers::RunTest(const FString&)
+{
+    FTableFixture Fixture;
+    const auto Original = *Fixture.Get(TEXT("Car")), Other = *Fixture.Get(TEXT("Bus"));
+    FString Code, Error; TSharedPtr<FJsonObject> Details;
+    auto Params = WriteParams(Fixture, TEXT(R"({"rows":["Car"],"operations":[
+        {"op":"set","path":["RenderTargetColors","Body","Samples"],"value":[{"X":1},{"X":2},{"X":3}]},
+        {"op":"remove","path":["RenderTargetColors","Body","Samples","1"]},
+        {"op":"remove","path":["ColorTypeMaterialParams","Green"]},
+        {"op":"set","path":["FloatParameters"],"value":{"Speed":42}},
+        {"op":"set","path":["AnimToPlay"],"value":null}]})"));
+    auto Result = FDSHDataTableOps::Patch(Params, Code, Error, Details);
+    if (!TestTrue(*Error, Result.IsValid())) return false;
+    TestTrue(TEXT("Container preview leaves row intact"), SameRow(Fixture.Get(TEXT("Car")), Original));
+    Params->SetBoolField(TEXT("dryRun"), false);
+    Result = FDSHDataTableOps::Patch(Params, Code, Error, Details);
+    if (!TestTrue(*Error, Result.IsValid())) return false;
+    const auto* Car = Fixture.Get(TEXT("Car"));
+    TestTrue(TEXT("Array deletion preserves remaining elements"), Car->RenderTargetColors[TEXT("Body")].Samples == TArray<FVector>{FVector(1,0,0), FVector(3,0,0)});
+    TestFalse(TEXT("Enum map key removed"), Car->ColorTypeMaterialParams.Contains(EDSHDataTableTestColor::Green));
+    TestTrue(TEXT("Map set merges existing entries"), Car->FloatParameters.Contains(TEXT("Warning")) && Car->FloatParameters[TEXT("Speed")] == 42);
+    TestTrue(TEXT("Object reference cleared"), Car->AnimToPlay.IsNull());
+    TestTrue(TEXT("Unselected row preserved"), SameRow(Fixture.Get(TEXT("Bus")), Other));
+    GEditor->UndoTransaction();
+    TestTrue(TEXT("Undo restores all container edits"), SameRow(Fixture.Get(TEXT("Car")), Original));
+    Params = WriteParams(Fixture, TEXT(R"({"dryRun":false,"rows":["Car"],"operations":[{"op":"remove","path":["FloatParameters","Warning"]},{"op":"remove","path":["FloatParameters","Missing"]}]})"));
+    TestFalse(TEXT("Invalid later removal rejects whole batch"), FDSHDataTableOps::Patch(Params, Code, Error, Details).IsValid());
+    TestTrue(TEXT("Failed remove preserves original"), SameRow(Fixture.Get(TEXT("Car")), Original));
     return true;
 }
 #endif
