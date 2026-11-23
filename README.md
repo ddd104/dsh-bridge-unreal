@@ -2,7 +2,9 @@
 
 DeepSeek Harness（DSH）的 Unreal Editor 桥接插件。每个对话可以独立绑定本机 UE 编辑器，显示手动添加的候选资产和独立的 Actor、组件实时选区，并使用蓝图、材质、DataTable、MCP、项目知识、运行快照和图像分析工具。
 
-本仓库提供 **DSH 端插件**安装入口，版本为 **0.6.4**，同步原仓库 0.6.4 的实现，适配 DSH **0.2.1-rc.2**。UE 工程侧需要另外将 [DSHUnrealBridge 0.5.4 插件](unreal/DSHUnrealBridge)导入项目、编译并启用。
+本仓库提供 **DSH 端插件**安装入口，版本为 **0.6.4**，同步原仓库 0.6.4 的实现，适配 DSH **0.2.1-rc.2**。UE 工程侧需要另外将 [DSHUnrealBridge 0.5.4 插件](./unreal/DSHUnrealBridge)导入项目、编译并启用。
+
+本文中的 `./` 表示本仓库根目录，命令默认在该目录执行。UE 工程内的路径以 `.uproject` 所在目录为基准；插件内部路径会单独说明。
 
 **仅支持 Unreal Engine 5.8（UE 5.8.x），不支持其他 UE 版本。** 请使用 UE 5.8 创建或打开目标项目，并使用同一引擎版本编译插件。
 
@@ -44,17 +46,17 @@ github:ddd104/dsh-bridge-unreal
 
 ### 从本地目录安装
 
-在同一“添加插件”输入框中，输入包含 `package.json` 的仓库根目录绝对路径。例如本机：
+本地安装使用包含 `package.json` 的仓库根目录，相对位置为：
 
 ```text
-D:\AI\dsh-bridge-unreal
+./
 ```
 
-点击安装，完成后启用插件。路径应指向本仓库根目录，不是 `src`、`lib` 或 UE 工程的插件目录。
+在同一“添加插件”输入框中填入该目录的实际完整路径，点击安装并启用插件。安装位置应指向仓库根目录，不是 `./src/`、`./lib/` 或 UE 工程的插件目录。
 
-也可以输入已生成的 `.tgz` 安装包的绝对路径。安装包生成和独立交付方法见[发行说明](docs/dsh-release.md)。
+也可以使用已生成的 `./dist/dsh/dsh-unreal-bridge-0.6.4.tgz`，将该文件的实际完整路径填入安装框。安装包生成和独立交付方法见[发行说明](./docs/dsh-release.md)。
 
-仓库根目录已经包含插件声明、`cordis.patch.yml` 和编译好的 `lib/index.js`、`lib/client.js`、`lib/remote.js`。安装用户无需运行 npm、编译源代码或执行批处理；下载依赖仍需要网络。仓库地址安装使用远端提交，因此本地修改必须先推送到 GitHub 才能被其他机器下载。
+仓库根目录已经包含插件声明、`./cordis.patch.yml` 和编译好的 `./lib/index.js`、`./lib/client.js`、`./lib/remote.js`。安装用户无需运行 npm、编译源代码或执行批处理；下载依赖仍需要网络。仓库地址安装使用远端提交，因此本地修改必须先推送到 GitHub 才能被其他机器下载。
 
 “中国大陆镜像源”控制依赖下载与 DSH 提供的 GitHub 镜像流程；GitHub 下载失败时按 DSH 的连接提示选择镜像或切换网络。插件本身不设置系统代理或改写镜像地址。
 
@@ -62,13 +64,13 @@ D:\AI\dsh-bridge-unreal
 
 ## 第二步：将 DSHUnrealBridge 导入 UE 5.8 项目
 
-在 DSH 中安装插件不会自动将 UE 插件装入项目，也不会自动编译 DLL。请手动导入本仓库的 `unreal/DSHUnrealBridge`；UE 端源码和构建说明也可在[原仓库](https://github.com/ddd104/dsh-unreal-bridge)查看。已经完成导入、编译和启用的 UE 5.8 项目可跳到下一步。
+在 DSH 中安装插件不会自动将 UE 插件装入项目，也不会自动编译 DLL。请手动导入本仓库的 `./unreal/DSHUnrealBridge/`；UE 端源码和构建说明也可在[原仓库](https://github.com/ddd104/dsh-unreal-bridge)查看。已经完成导入、编译和启用的 UE 5.8 项目可跳到下一步。
 
 ### 导入、编译与启用
 
 1. 确认目标项目使用 **UE 5.8**，然后关闭该项目的 Unreal Editor。
 2. 在 `.uproject` 文件所在的项目根目录创建 `Plugins` 文件夹；已存在时直接使用。
-3. 将本仓库 `unreal/DSHUnrealBridge` **整个文件夹**复制到项目的 `Plugins` 下，确保插件描述文件位于 `Plugins/DSHUnrealBridge/DSHUnrealBridge.uplugin`。不要只复制 `.uplugin` 文件，也不要将插件放进 `Content` 或通过内容浏览器导入。
+3. 将本仓库 `./unreal/DSHUnrealBridge/` **整个文件夹**复制到项目的 `Plugins` 下，确保插件描述文件位于 `Plugins/DSHUnrealBridge/DSHUnrealBridge.uplugin`。不要只复制 `.uplugin` 文件，也不要将插件放进 `Content` 或通过内容浏览器导入。
 4. 使用 **UE 5.8** 和对应的 C++ 构建环境编译项目的 Editor 目标，再打开项目。如果提示模块缺失或需要重新编译，先完成编译；不能使用其他 UE 版本的插件 DLL。
 5. 在 UE 的 **编辑 → 插件（Edit → Plugins）** 中搜索并启用 **DSH Unreal Bridge**。插件声明依赖 `ModelContextProtocol` 与 `ToolsetRegistry`；需要通用 UE MCP 操作时，工程还应启用所需工具集，例如原仓库使用的 `AllToolsets`。按 UE 提示重启编辑器。
 
@@ -87,7 +89,7 @@ MyProject/
       └─ Tools/
 ```
 
-升级已有插件时，先备份原来的 `Plugins/DSHUnrealBridge`，并保留自己修改过的 `Config/Knowledge/ProjectMemory.project.json`。
+升级已有插件时，先备份工程中的 `Plugins/DSHUnrealBridge`，并保留该插件目录内自己修改过的 `Config/Knowledge/ProjectMemory.project.json`。
 
 ### 准备项目知识工具
 
@@ -100,11 +102,11 @@ MyProject/
    powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\prepare-knowledge.ps1
    ```
 
-3. 将本仓库 `unreal/DSHUnrealBridge` 中准备好的 `Runtime`、`Tools` 目录复制到目标项目的 `Plugins/DSHUnrealBridge` 下，保持与该 UE 插件源码版本配套，然后重新打开项目。
+3. 将本仓库 `./unreal/DSHUnrealBridge/` 中准备好的 `Runtime`、`Tools` 目录复制到目标项目的 `Plugins/DSHUnrealBridge` 下，保持与该 UE 插件源码版本配套，然后重新打开项目。
 
 原仓库的 `install-dsh.bat` 同时处理旧版 DSH 安装流程；已通过本仓库安装 DSH 端时，可按上面的步骤单独准备 UE 端。
 
-本次两端同步增加了 DataTable 逐行写入、新增、改名、删除、复制、清空，以及嵌套 Map/数组元素删除能力；支持默认预览、整批校验、失败回滚和撤销/重做，提交后不自动保存。新增的手动候选列表需要 DSH 0.6.4 与 UE 0.5.4 配套使用。使用这些能力需要同时更新 DSH 端并重新编译 UE 端；参数说明见[工具与通信协议](docs/protocol.md)。
+本次两端同步增加了 DataTable 逐行写入、新增、改名、删除、复制、清空，以及嵌套 Map/数组元素删除能力；支持默认预览、整批校验、失败回滚和撤销/重做，提交后不自动保存。新增的手动候选列表需要 DSH 0.6.4 与 UE 0.5.4 配套使用。使用这些能力需要同时更新 DSH 端并重新编译 UE 端；参数说明见[工具与通信协议](./docs/protocol.md)。
 
 ## 第三步：绑定编辑器并添加候选资产
 
@@ -119,7 +121,7 @@ MyProject/
    读取当前绑定的 Unreal Editor 状态，告诉我工程、候选资产、实时对象和可用工具能力，不修改任何资产。
    ```
 
-默认连接仅监听本机 `127.0.0.1:17891`。Windows 下 UE 从 `%LOCALAPPDATA%\DSHUnrealBridge\bridge.json` 发现 DSH 端连接信息；正常使用不需要手动填写或复制令牌。
+默认连接仅监听本机 `127.0.0.1:17891`。Windows 下，连接发现文件相对于当前用户本地应用数据目录（`LOCALAPPDATA`）的位置为 `DSHUnrealBridge/bridge.json`；正常使用不需要手动填写或复制令牌。
 
 候选列表按编辑器实例维护，同一编辑器的多个对话共享，最多 256 项；同进程断线重连保留，完全重启 UE 后重新添加。资产重命名或删除时同步更新候选。旧版 UE 插件仍使用实时资产选择模式，需要更新并编译 UE 0.5.4 才能使用手动候选。
 
@@ -161,13 +163,13 @@ MyProject/
 将这张参考图与当前选中物体的编辑器画面对比，用中文说明色彩、形状和材质上的差异，不修改场景。
 ```
 
-当前画面捕获支持编辑器关卡视口，不支持 PIE 游戏窗口截图。不同视角或构图的参考图用于辅助分析，不等同于像素验收。详见[局部画面对比](docs/visual-comparison.md)。
+当前画面捕获支持编辑器关卡视口，不支持 PIE 游戏窗口截图。不同视角或构图的参考图用于辅助分析，不等同于像素验收。详见[局部画面对比](./docs/visual-comparison.md)。
 
 ### 查询项目资料与技能
 
 将 DSH 会话工作区设置为 UE 工程目录或其子目录。插件会向上寻找 `.uproject`，接入该工程 `Plugins/DSHUnrealBridge/Skills` 中的技能；项目知识查询需要 UE 端知识工具已经准备完成。可以请求“查询项目资料中角色移动系统的设计，并结合当前蓝图说明实现”。
 
-完整工具行为与参数见[工具与通信协议](docs/protocol.md)。
+完整工具行为与参数见[工具与通信协议](./docs/protocol.md)。
 
 ## 设置、升级与卸载
 
@@ -183,7 +185,7 @@ MyProject/
 
 | 现象 | 排查顺序 |
 | --- | --- |
-| GitHub 地址安装失败 | 确认代码已推送且仓库可访问；按 DSH 提示选择镜像或检查网络。本地尚未发布时改用绝对目录路径安装 |
+| GitHub 地址安装失败 | 确认代码已推送且仓库可访问；按 DSH 提示选择镜像或检查网络。本地尚未发布时按“从本地目录安装”操作 |
 | 安装成功但没有面板 | 确认插件已启用、DSH 为适配版本；完整退出 DSH（包括托盘）后重开，并打开一个对话 |
 | 面板没有在线 UE | 确认 UE 插件编译并加载成功、两端运行于同一用户、没有另一份桥接进程占用端口；查看 DSH 和 UE 的错误日志 |
 | 候选资产或实时对象不对 | 检查当前对话绑定的工程；资产需右键“添加到 DSH”，Actor/组件需重新选择，再核对面板中的对象路径 |
