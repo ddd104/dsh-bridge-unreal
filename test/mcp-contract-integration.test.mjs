@@ -85,12 +85,12 @@ test('raw top-level call_tool with empty or omitted toolset validates inner requ
   }
 });
 
-test('normalizing a qualified nested dispatcher cannot hide a prohibited DataTable write',async t=>{
+test('normalizing a qualified nested dispatcher cannot hide an unresolved target',async t=>{
   const bridge=await fixture(t);const calls=await editor(bridge,'UE',()=>ok({unexpected:true}));bridge.bind('chat','UE');
   await assert.rejects(bridge.mcpCallToolset('chat',{
     toolsetName:'UnknownToolset',toolName:'UnknownToolset.call_tool',requestId:randomUUID(),
     arguments:{toolset_name:DATA_TABLE,tool_name:'set_rows',arguments:{}},
-  }),error=>error.code==='MCP_POLICY_BLOCKED'&&error.details.reason==='lossy_json_roundtrip');
+  }),error=>error.code==='MCP_TARGET_UNSUPPORTED');
   assert.equal(calls.length,0);
 });
 

@@ -47,4 +47,5 @@ try {
         Remove-Item -LiteralPath $modulesDir -Recurse -Force
     }
 } finally { Pop-Location }
+& (Join-Path $PSScriptRoot 'check-knowledge.ps1') -PluginRoot $pluginRoot -RunTests
 Write-Output "Prepared project knowledge tools: $pluginRoot"

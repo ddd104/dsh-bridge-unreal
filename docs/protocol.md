@@ -122,7 +122,7 @@ DSH 0.6.3 / UE 0.5.3 新增 `unreal_data_table_add_rows`（固定 `mode:add`，`
 
 完整性失败返回 `DATA_TABLE_VERIFICATION_FAILED`，错误 `details.rollback` 为 `restored` 或 `failed`；失败前未写入时为 `not_needed`。宿主收到 `failed` 或缺少成功验证结果时锁定该编辑器后续写入，跨会话、新请求 ID 和重新绑定均不能绕过。历史请求重放保持原错误与回滚状态。
 
-发送 MCP 前检查完整工具名和 `call_tool` 封装，名称规范化后再次检查，不能利用完整名隐藏嵌套的调度入口；有损 DataTable JSON 修改、脚本执行及默认关闭的桌面输入返回 `MCP_POLICY_BLOCKED`、`details.retryable:false`。该标记禁止重复被拦截的操作，不取消整轮；模型可改用许可方式或说明当前限制。能力不可用也返回模型处理，不能通过脚本或替代入口绕过。MCP 内层 `isError:true` 或 `ok:false` 均保留原始错误：已确认只读的 `DataTableTools.get_schema/list_rows/get_rows/search_row_structs` 返回 `MCP_READ_ERROR`，其他未知或写入工具返回 `MCP_TOOL_ERROR`，均允许在预算内根据错误纠正后继续。完整性检查失败且 `rollback:restored` 或 `not_needed` 时也保留纠正机会。
+发送 MCP 前检查完整工具名和 `call_tool` 封装，名称规范化后再次检查，不能利用完整名隐藏嵌套的调度入口；UE MCP 叶子工具默认全部开放。仅含糊的调度封装或宿主显式配置 `allowMcpDesktopInput:false` 下的直接桌面输入返回 `MCP_POLICY_BLOCKED`、`details.retryable:false`。DataTable 旧 JSON 写入保留上游行为，描述中提示优先使用保真的原生行工具。该标记禁止重复被拦截的操作，不取消整轮；模型可改用许可方式或说明当前限制。能力不可用也返回模型处理，不能通过脚本或替代入口绕过。MCP 内层 `isError:true` 或 `ok:false` 均保留原始错误：精确审计的蓝图、对象、材质、材质实例、DataTable 和脚本环境查询返回 `MCP_READ_ERROR`，其他未知或写入工具返回 `MCP_TOOL_ERROR`，均允许在预算内根据错误纠正后继续。完整性检查失败且 `rollback:restored` 或 `not_needed` 时也保留纠正机会。
 
 `rollback:not_available` 不表示已恢复，也不能据此断定只读失败写坏了资产。任意通用 MCP 写入不获得原生 DataTable 的回滚保证；写入失败未提供回滚时，模型须先读取真实状态，再修正操作，不能原样盲重放。已结束失败的请求修正后使用新 UUID；超时、断线等结果未知时先用原 UUID 查询 `unreal_request_status`。`MCP_TARGET_* / execution:not_started` 的预检拒绝未消费 UUID，仍适用下文的原 UUID 复用规则。ObjectTools 数组追加必须保留旧元素读取返回的 JSON 表示，只增加新元素；已有字符串引用不能顺手改成 `refPath` 对象，否则会被识别为同时改旧值和插入。
 
@@ -162,7 +162,7 @@ UE 同时跟踪最多 1024 个 Actor/组件句柄，达到上限时回收最久�
 
 UE 桥接公开范围、写入分类和 Knowledge 服务后端路由共用 `ProjectKnowledgeTools.inl` 目录；三项 `graph_*` 均转发到 worker。跨语言契约测试核对该目录、实际宿主参数枚举和 worker 准入表。内部 `project_update/inspect_object/find_objects` 不因此开放给对话。
 
-没有适用原生操作的资产增删改查走 UE 5.8 的 MCP 工具。先用 `unreal_mcp_toolsets` 找到完整工具集名称，例如 `editor_toolset.toolsets.asset.AssetTools`，再用 `unreal_mcp_describe` 取得实际工具名称与参数，最后调用 `unreal_mcp_call_toolset`。该调用在已绑定的 UE 进程内执行注册工具，不启动另一个 HTTP MCP 服务；`DSHUnrealBridgeMCP` 是 UE 插件内单独的接入模块。MCP 调用默认直接执行，不经过 DSH 逐次批准；`allowWrites: false` 拒绝写入和未确认只读的 MCP，保留上述已审计的 DataTable、材质、蓝图和对象查询。脚本执行型工具被接入模块拒绝。调用继续沿用请求编号去重、审计和结果未知查询机制。工具集内的保存/删除等操作会遵循 UE 工具自身语义，不沿用原生图补丁的预览与版本机制。
+没有适用原生操作的资产增删改查走 UE 5.8 的 MCP 工具。先用 `unreal_mcp_toolsets` 找到完整工具集名称，例如 `editor_toolset.toolsets.asset.AssetTools`，再用 `unreal_mcp_describe` 取得实际工具名称与参数，最后调用 `unreal_mcp_call_toolset`。该调用在已绑定的 UE 进程内执行注册工具，不启动另一个 HTTP MCP 服务；`DSHUnrealBridgeMCP` 是 UE 插件内单独的接入模块。MCP 调用默认直接执行，不经过 DSH 逐次批准；`allowWrites: false` 拒绝写入和未确认只读的 MCP，保留已审计的 DataTable、材质、材质实例、蓝图、对象及脚本环境查询。0.6.5 / UE 0.5.5 开放脚本执行，按写操作处理；执行前先查询 UE 提供的执行环境，内部调用不具备逐项预览和统一回滚保证。调用继续沿用请求编号去重、审计和结果未知查询机制。工具集内的保存/删除等操作会遵循 UE 工具自身语义，不沿用原生图补丁的预览与版本机制。
 
 `unreal_mcp_describe` 把工具名称拆为 `name`（如 `get_schema`）、`fullName`（如 `editor_toolset.toolsets.data_table.DataTableTools.get_schema`）和 `toolsetName`。`unreal_mcp_call_toolset` 将短名或匹配当前工具集的完整名规范为短名，再构造执行请求，避免重复前缀。每次执行前，宿主从同一绑定编辑器取得目标工具的精确 schema，用 Ajv 检查缺少必填字段、参数类型等问题；预检失败不发送执行请求，返回可修正错误。`unreal_mcp_call` 的 `call_tool` 封装共用此预检；省略或留空 `toolset_name` 时，按 `tool_name` 解析顶层工具，校验该目标工具的内层参数，再直接调用目标，不能只校验宽泛的外层封装。`call_tool` 调用自身被拒绝。桥接不猜参数，也不把 camelCase 自动改成下划线字段；以 schema 为准。
 
@@ -187,7 +187,7 @@ UE 桥接公开范围、写入分类和 Knowledge 服务后端路由共用 `Proj
 
 校验不调用工具探测，不使用属性导入器创建对象，不加载资产或切换地图。已加载对象按真实身份校验；未加载顶层资产可使用资产注册表的类型证据，未加载的类或子对象引用无法确认时拒绝。返回 `MCP_TARGET_*` 且 `details.execution:"not_started"` 的错误表示工具尚未执行，包含可用的参数位置、期望与实际类型；此时可纠正参数后复用原 UUID。已经执行的成功、失败和未知结果继续遵循原去重与写入保护，不因预检错误规则而放开重跑。
 
-`unreal_state.toolSafety` 分别报告宿主参数校验、原生目标校验和安全展示能力。此层不证明任意工具内部无缺陷，也不取代具体操作的属性写权限、连线兼容性、业务结果及保存验证。`get_` / `find_` 名称并不保证无副作用；DataTable 有损 JSON 写入仍按既有策略拒绝。
+`unreal_state.toolSafety` 分别报告宿主参数校验、原生目标校验和安全展示能力。此层不证明任意工具内部无缺陷，也不取代具体操作的属性写权限、连线兼容性、业务结果及保存验证。`get_` / `find_` 名称并不保证无副作用；旧 DataTable JSON 写入已开放，但会重写整表，局部修改优先使用原生行工具以保留无关原生值。
 
 成功的蓝图创建、应用和撤销，以及能够识别目标资产的 MCP 修改，可为已加载的受支持资产排队展示。图和节点解析到真实所属蓝图，关卡蓝图保留完整子对象身份；World、Level、任意 UObject 和未知资产不自动打开。关卡蓝图只有属于当前编辑世界或其已加载流送关卡时才展示，绝不以打开地图作为回退。同一展示最多打开一次编辑器，第二阶段只聚焦已经打开的窗口；跨帧使用弱身份，失效后不按同名路径重绑。蓝图和动画蓝图按节点 GUID 聚焦，材质按表达式 GUID 或节点 GUID 聚焦。展示跳过不等于工具失败，也不证明已保存。布局同样保留原 owner/graph 弱身份，失效或替换对象不继承旧快照。
 

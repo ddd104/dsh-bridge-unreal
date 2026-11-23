@@ -6,10 +6,21 @@ const DATA_TABLE='editor_toolset.toolsets.data_table.DataTableTools';
 export const BLUEPRINT_TOOLSET='editor_toolset.toolsets.blueprint.BlueprintTools';
 export const OBJECT_TOOLSET='editor_toolset.toolsets.object.ObjectTools';
 // Audited blueprint.py/object.py and their native graph/property query paths.
-// read_graph_dsl/get_node_type_pins temporarily add/remove live nodes: excluded.
-export const BLUEPRINT_READ_TOOLS=Object.freeze(['get_default_object','list_graphs','find_nodes','get_node_infos'].map(name=>`${BLUEPRINT_TOOLSET}.${name}`));
-export const OBJECT_READ_TOOLS=Object.freeze(['get_class','get_properties','list_properties'].map(name=>`${OBJECT_TOOLSET}.${name}`));
+// Node-type discovery and DSL reads can temporarily add/remove live nodes:
+// find_node_types/find_node_categories/get_node_type_pins/read_graph_dsl stay writes.
+export const BLUEPRINT_READ_TOOLS=Object.freeze([
+  'get_default_object','list_graphs','get_graph','list_functions','list_events',
+  'find_nodes','get_node_infos','get_connected_subgraph','get_create_event_function',
+  'get_pin_value','get_parent','list_variables','get_variable_replication',
+  'get_variable_category','list_event_dispatchers','get_graph_dsl_docs',
+  'list_component_events','list_compatible_event_functions',
+].map(name=>`${BLUEPRINT_TOOLSET}.${name}`));
+export const OBJECT_READ_TOOLS=Object.freeze(['get_class','get_properties','list_properties','search_subclasses'].map(name=>`${OBJECT_TOOLSET}.${name}`));
 export const MATERIAL_TOOLSET='editor_toolset.toolsets.material.MaterialTools';
+export const MATERIAL_INSTANCE_TOOLSET='editor_toolset.toolsets.material_instance.MaterialInstanceTools';
+export const MATERIAL_INSTANCE_READ_TOOLS=Object.freeze([
+  'list_parameters','get_scalar_parameter','get_vector_parameter','get_texture_parameter','get_static_switch_parameter',
+].map(name=>`${MATERIAL_INSTANCE_TOOLSET}.${name}`));
 // Audited UE 5.8 material.py and its MaterialEditingLibrary query implementations.
 // Keep the native IsAuditedMcpRead allowlist aligned with these exact names.
 export const MATERIAL_READ_TOOLS=Object.freeze([
@@ -22,8 +33,10 @@ export const MATERIAL_READ_TOOLS=Object.freeze([
 export const AUDITED_MCP_READS=Object.freeze([
   ...['get_schema','list_rows','get_rows','search_row_structs'].map(name=>`${DATA_TABLE}.${name}`),
   ...MATERIAL_READ_TOOLS,
+  ...MATERIAL_INSTANCE_READ_TOOLS,
   ...BLUEPRINT_READ_TOOLS,
   ...OBJECT_READ_TOOLS,
+  'editor_toolset.toolsets.programmatic.ProgrammaticToolset.get_execution_environment',
 ]);
 const READS=new Set(AUDITED_MCP_READS);
 const notStarted={execution:'not_started',retryable:true};

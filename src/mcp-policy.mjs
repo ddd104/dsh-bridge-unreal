@@ -5,15 +5,29 @@ import { BridgeError } from './protocol.mjs';
 const identifier = words => new RegExp(`(?:^|[^a-z0-9])${words.join('[^a-z0-9]*')}(?=$|[^a-z0-9])`, 'i');
 const method = words => new RegExp(`(?:^|[^a-z0-9])${words.join('[^a-z0-9]*')}$`, 'i');
 const compact = value => typeof value === 'string' ? value.toLowerCase().replace(/[^a-z0-9]/g, '') : '';
-const DATA_TABLE = identifier(['data', 'table', 'tools']);
-const PROGRAMMATIC = identifier(['programmatic', 'toolset']);
 const SLATE = identifier(['slate', 'inspector', 'toolset']);
-const EXECUTE_SCRIPT = method(['execute', 'tool', 'script']);
-const LOSSY_DATA_TABLE_METHODS = ['set', 'add', 'rename'].flatMap(verb => [method([verb, 'row']), method([verb, 'rows'])]);
 const SLATE_READ_PATTERNS = [['snapshot'], ['observe'], ['unobserve'], ['screenshot'], ['wait', 'for'], ['list', 'observers']].map(method);
 // These names cover the bridge's public wrapper and UE's actual call_tool
 // envelope. Separators and case are normalized only for tool identifiers.
 const DISPATCHERS = new Set(['calltool', 'calltoolset', 'unrealmcpcall', 'unrealmcpcalltoolset']);
+
+/** Describe exposed upstream semantics without removing tools from discovery. */
+export function mcpAccess(name, options = {}) {
+  const access = { available: true };
+  if (name === 'editor_toolset.toolsets.programmatic.ProgrammaticToolset.execute_tool_script') {
+    access.note = 'Runs in the UE-provided execution environment. Inner calls do not receive individual bridge previews, repair scopes or rollback guarantees.';
+  }
+  const legacy = name.match(/^editor_toolset\.toolsets\.data_table\.DataTableTools\.(set_rows|add_rows|rename_rows)$/)?.[1];
+  if (legacy) {
+    access.preferredTool = {set_rows:'unreal_data_table_write_rows',add_rows:'unreal_data_table_add_rows',rename_rows:'unreal_data_table_rename_rows'}[legacy];
+    access.note = 'UE rewrites the entire DataTable through JSON; unrelated native values may lose fidelity. Prefer the native row tool for partial edits.';
+  }
+  if (SLATE.test(name) && options.allowDesktopInput === false) {
+    access.condition = 'Desktop input is explicitly disabled by host configuration; observation remains available and Windows only allows list.';
+    if (!SLATE_READ_PATTERNS.some(pattern => pattern.test(name)) && !method(['windows']).test(name)) access.available = false;
+  }
+  return access;
+}
 
 function blocked(reason, message, recommendedTool) {
   throw new BridgeError('MCP_POLICY_BLOCKED', message, {
@@ -29,17 +43,6 @@ function fieldValues(object, key) {
 }
 
 function checkTarget(name, args, allowDesktopInput) {
-  if (PROGRAMMATIC.test(name) || EXECUTE_SCRIPT.test(name)) {
-    blocked('script_execution', 'MCP script execution is disabled. Do not retry; use a native Unreal operation.');
-  }
-  // data_table.py add_rows, rename_rows and set_rows all call _write_table,
-  // which rebuilds the entire asset via an asymmetric JSON round trip.
-  // remove_rows is a native row removal; create/import_file do not take this
-  // lossy path, so these methods remain available.
-  if (DATA_TABLE.test(name) && LOSSY_DATA_TABLE_METHODS.some(pattern => pattern.test(name))) {
-    const recommended=method(['rename','rows?']).test(name)?'unreal_data_table_rename_rows':method(['add','rows?']).test(name)?'unreal_data_table_add_rows':'unreal_data_table_write_rows';
-    blocked('lossy_json_roundtrip', 'This legacy DataTable implementation can lose unrelated data. Do not retry it. Use '+recommended+' for this operation. Native row tools also support delete_rows, duplicate_rows and clear; unreal_data_table_patch edits nested values and removes map/array entries. If the required capability is missing, report the plugin update requirement; do not rebuild the bridge during an asset-edit task.', recommended);
-  }
   if (!SLATE.test(name) || allowDesktopInput) return;
   if (method(['windows']).test(name)) {
     // Windows is observational only for its default/list action. select and
@@ -53,15 +56,15 @@ function checkTarget(name, args, allowDesktopInput) {
 }
 
 /**
- * Reject unsafe MCP dispatch before sending it to an editor. This is a pure
- * policy check: it neither changes the input nor inspects script/shell bodies.
- * Desktop input can be enabled only by an explicit host-owned option; DataTable
- * JSON mutators and MCP script execution remain disabled in either mode.
+ * All discovered UE MCP leaf operations are exposed by default. Keep dispatch
+ * shape checks and honor an explicit host desktop-input restriction. Script
+ * execution and legacy DataTable writers follow UE's own tool contract; they
+ * still pass schema validation, write admission, deduplication and error handling.
  * Returns undefined when allowed; throws BridgeError/MCP_POLICY_BLOCKED when
  * blocked, with details.retryable=false and a stable details.reason.
  */
 export function assertSafeMcpCall(call, options = {}) {
-  const allowDesktopInput = options.allowDesktopInput === true;
+  const allowDesktopInput = options.allowDesktopInput !== false;
   let current = call;
   for (let depth = 0; depth < 8; depth++) {
     const name = typeof current?.name === 'string' ? current.name : '';

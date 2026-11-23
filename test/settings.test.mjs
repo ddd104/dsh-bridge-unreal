@@ -41,7 +41,7 @@ test('official Config exposes only editable fields as volatile and validates def
   }
   for (const key of ['port','stateDir','allowMcpDesktopInput']) assert.notEqual(Config.dict[key].meta.volatile, true);
   assert.equal(parsed.port, 17891);
-  assert.equal(parsed.allowMcpDesktopInput, false);
+  assert.equal(parsed.allowMcpDesktopInput, true);
   assert.equal(createConfigState({requireApproval:false}).current.requireApproval, false);
 });
 

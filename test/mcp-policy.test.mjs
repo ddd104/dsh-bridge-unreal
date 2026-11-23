@@ -1,121 +1,58 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { assertSafeMcpCall } from '../src/mcp-policy.mjs';
-import { BridgeError } from '../src/protocol.mjs';
+import {assertSafeMcpCall,mcpAccess} from '../src/mcp-policy.mjs';
 
-const dataTable = 'editor_toolset.toolsets.data_table.DataTableTools';
-const slate = 'SlateInspectorToolset.SlateInspectorToolset';
-const programmatic = 'editor_toolset.toolsets.programmatic.ProgrammaticToolset';
-const callTool = (toolset, tool, args = {}) => ({ name: 'call_tool', arguments: { toolset_name: toolset, tool_name: tool, arguments: args } });
-const denied = (call, reason, options) => assert.throws(() => assertSafeMcpCall(call, options), error => {
-  assert.ok(error instanceof BridgeError);
-  assert.equal(error.code, 'MCP_POLICY_BLOCKED');
-  assert.equal(error.details.reason, reason);
-  assert.equal(error.details.retryable, false);
-  assert.match(error.message, /Do not retry/);
-  return true;
-});
+const dataTable='editor_toolset.toolsets.data_table.DataTableTools';
+const slate='SlateInspectorToolset.SlateInspectorToolset';
+const programmatic='editor_toolset.toolsets.programmatic.ProgrammaticToolset';
+const callTool=(toolset,tool,args={})=>({name:'call_tool',arguments:{toolset_name:toolset,tool_name:tool,arguments:args}});
+const denied=(call,reason,options)=>assert.throws(()=>assertSafeMcpCall(call,options),error=>error.code==='MCP_POLICY_BLOCKED'&&error.details.reason===reason&&error.details.retryable===false);
 
-test('blocks the actual DataTable JSON writers, their singular aliases and qualified direct calls', () => {
-  for (const tool of ['set_rows', 'add_rows', 'rename_rows', 'set_row', 'add_row', 'rename_row']) {
-    denied(callTool(dataTable, tool), 'lossy_json_roundtrip');
-    denied(callTool(dataTable, `${dataTable}.${tool}`), 'lossy_json_roundtrip');
-    denied({ name: `${dataTable}.${tool}`, arguments: {} }, 'lossy_json_roundtrip');
+test('all previously restricted UE tools are exposed through direct and toolset dispatch by default',()=>{
+  for(const [toolset,leaves] of [
+    [dataTable,['set_rows','add_rows','rename_rows','remove_rows','import_file']],
+    [slate,['Click','DoubleClick','PressKey','Type','Hover','Drag','SelectOption','FillForm','Scroll','Windows']],
+    [programmatic,['get_execution_environment','execute_tool_script']],
+    ['editor_toolset.toolsets.asset.AssetTools',['write_file']],
+  ])for(const tool of leaves){
+    assertSafeMcpCall(callTool(toolset,tool));
+    assertSafeMcpCall(callTool(toolset,`${toolset}.${tool}`));
+    assertSafeMcpCall({name:`${toolset}.${tool}`,arguments:{}});
   }
-  try { assertSafeMcpCall(callTool(dataTable, 'set_rows')); }
-  catch (error) { assert.equal(error.details.recommendedTool, 'unreal_data_table_write_rows'); }
-  for(const [tool,recommendedTool] of [['add_rows','unreal_data_table_add_rows'],['rename_row','unreal_data_table_rename_rows'],['rename_rows','unreal_data_table_rename_rows']]){
-    assert.throws(()=>assertSafeMcpCall(callTool(dataTable,tool)),error=>error.details.recommendedTool===recommendedTool);
+  for(const action of ['list','select','close'])assertSafeMcpCall(callTool(slate,'Windows',{action}));
+});
+
+test('explicit desktop restriction is honored while preserving queries and other toolsets',()=>{
+  const options={allowDesktopInput:false};
+  for(const name of ['Click','DoubleClick','PressKey','Type','Hover','Drag','SelectOption','FillForm','Scroll'])denied(callTool(slate,name),'desktop_input',options);
+  for(const name of ['Snapshot','Observe','Unobserve','ListObservers','Screenshot','WaitFor'])assertSafeMcpCall(callTool(slate,name),options);
+  for(const args of [{},{action:'list'},{Action:'LIST'}])assertSafeMcpCall(callTool(slate,'Windows',args),options);
+  for(const args of [{action:'select'},{Action:'close'},{action:'list',Action:'close'},{action:null}])denied(callTool(slate,'Windows',args),'desktop_input',options);
+  assertSafeMcpCall(callTool(dataTable,'set_rows'),options);
+  assertSafeMcpCall(callTool(programmatic,'execute_tool_script'),options);
+  denied(callTool(slate,'Click',{allowDesktopInput:true}),'desktop_input',options);
+});
+
+test('ambiguous dispatcher fields and excessive nesting are still rejected',()=>{
+  for(const args of [{},{toolset_name:dataTable},{toolset_name:'Safe',toolsetName:dataTable,tool_name:'set_rows'},{toolset_name:'Safe',tool_name:'get_rows',toolName:'execute_tool_script'}])denied({name:'call_tool',arguments:args},'invalid_tool_dispatch');
+  let nested=callTool(dataTable,'get_rows');
+  for(let i=0;i<9;i++)nested={name:'unreal_mcp_call',arguments:nested};
+  denied(nested,'invalid_tool_dispatch');
+});
+
+test('wrapper aliases preserve explicit host restrictions without scanning arbitrary argument text',()=>{
+  denied({name:'unreal_mcp_call_toolset',arguments:{toolsetName:slate,toolName:'Click'}},'desktop_input',{allowDesktopInput:false});
+  denied({name:'unreal_mcp_call',arguments:callTool(slate,'Click')},'desktop_input',{allowDesktopInput:false});
+  const call=callTool('editor_toolset.toolsets.blueprint.BlueprintTools','create_node',{name:'SlateInspectorToolset.Click',script:'execute_tool_script'});
+  const before=structuredClone(call);assertSafeMcpCall(call,{allowDesktopInput:false});assert.deepEqual(call,before);
+});
+
+test('discovery explains legacy behavior and preferred native routes without hiding functionality',()=>{
+  for(const [tool,preferred] of [['set_rows','unreal_data_table_write_rows'],['add_rows','unreal_data_table_add_rows'],['rename_rows','unreal_data_table_rename_rows']]){
+    const access=mcpAccess(`${dataTable}.${tool}`);assert.equal(access.available,true);assert.equal(access.preferredTool,preferred);assert.match(access.note,/entire DataTable/);
   }
-});
-
-test('recognizes case, punctuation and camelCase variants of qualified identifiers', () => {
-  for (const name of [
-    'EDITOR_TOOLSET.TOOLSETS.DATA_TABLE.DATATABLETOOLS.SET_ROWS',
-    'DataTableTools::setRows',
-    'data-table-tools/set-rows',
-    'mcp__unreal__DataTableTools__Set_Rows',
-    'SlateInspectorToolset::Press_Key',
-    'slate-inspector-toolset/double-click',
-  ]) denied({ name }, name.toLowerCase().includes('slate') ? 'desktop_input' : 'lossy_json_roundtrip');
-  denied({ name: 'CALL-TOOL', arguments: { TOOLSET_NAME: 'DataTableTools', TOOL_NAME: 'SetRows', arguments: {} } }, 'lossy_json_roundtrip');
-});
-
-test('allows DataTable reads and operations which do not use the lossy JSON write path', () => {
-  for (const tool of ['search_row_structs', 'get_schema', 'list_rows', 'get_rows', 'read_rows', 'remove_rows', 'create', 'import_file']) {
-    assert.equal(assertSafeMcpCall(callTool(dataTable, tool)), undefined);
-    assert.equal(assertSafeMcpCall({ name: `${dataTable}.${tool}` }), undefined);
-  }
-  assert.equal(assertSafeMcpCall({ name: 'data_table_copy_property' }), undefined);
-});
-
-test('blocks ProgrammaticToolset and script execution aliases even under an unknown toolset', () => {
-  for (const call of [
-    callTool(programmatic, 'execute_tool_script'),
-    callTool(programmatic, 'list_supported_modules'),
-    callTool('UnknownToolset', 'execute_tool_script'),
-    callTool('UnknownToolset', 'ExecuteToolScript'),
-    { name: `${programmatic}.execute_tool_script` },
-    { name: 'unknown-toolset/Execute-Tool-Script' },
-    { name: 'execute_tool_script' },
-  ]) denied(call, 'script_execution');
-});
-
-test('blocks all Slate desktop actions while preserving observational tools', () => {
-  for (const tool of ['Click', 'DoubleClick', 'PressKey', 'Type', 'Hover', 'Drag', 'SelectOption', 'FillForm', 'Scroll']) {
-    denied(callTool(slate, tool), 'desktop_input');
-    denied({ name: `${slate}.${tool}`, arguments: {} }, 'desktop_input');
-  }
-  for (const tool of ['Snapshot', 'Observe', 'Unobserve', 'ListObservers', 'Screenshot', 'WaitFor', 'Wait_For', 'List_Observers']) {
-    assert.equal(assertSafeMcpCall(callTool(slate, tool)), undefined);
-    assert.equal(assertSafeMcpCall({ name: `${slate}.${tool}` }), undefined);
-  }
-});
-
-test('Windows permits only its default/list action, including direct qualified calls', () => {
-  for (const args of [{}, { action: 'list' }, { Action: 'LIST' }]) {
-    assert.equal(assertSafeMcpCall(callTool(slate, 'Windows', args)), undefined);
-    assert.equal(assertSafeMcpCall({ name: `${slate}.Windows`, arguments: args }), undefined);
-  }
-  for (const args of [{ action: 'select' }, { Action: 'close' }, { action: 'list', Action: 'close' }, { action: null }, { action: '' }]) {
-    denied(callTool(slate, 'Windows', args), 'desktop_input');
-  }
-});
-
-test('only an explicit host option enables desktop input; scripts and lossy writers stay blocked', () => {
-  assert.equal(assertSafeMcpCall(callTool(slate, 'Click'), { allowDesktopInput: true }), undefined);
-  assert.equal(assertSafeMcpCall(callTool(slate, 'Windows', { action: 'close' }), { allowDesktopInput: true }), undefined);
-  denied(callTool(slate, 'Click', { allowDesktopInput: true }), 'desktop_input');
-  denied(callTool(slate, 'Click'), 'desktop_input', { allowDesktopInput: 'true' });
-  denied(callTool(dataTable, 'set_rows'), 'lossy_json_roundtrip', { allowDesktopInput: true });
-  denied(callTool(programmatic, 'execute_tool_script'), 'script_execution', { allowDesktopInput: true });
-});
-
-test('covers public camelCase wrappers and nested top-level dispatch', () => {
-  denied({ name: 'unreal_mcp_call_toolset', arguments: { toolsetName: dataTable, toolName: 'set_rows', arguments: {} } }, 'lossy_json_roundtrip');
-  denied({ name: 'call_toolset', arguments: { toolsetName: slate, toolName: 'Click', arguments: {} } }, 'desktop_input');
-  denied({ name: 'unreal_mcp_call', arguments: callTool('UnknownToolset', 'execute_tool_script') }, 'script_execution');
-  denied(callTool('UnknownToolset', 'call_tool', { toolset_name: dataTable, tool_name: 'set_rows', arguments: {} }), 'lossy_json_roundtrip');
-  assert.equal(assertSafeMcpCall({ name: 'unreal_mcp_call', arguments: callTool(dataTable, 'get_rows') }), undefined);
-});
-
-test('ambiguous dispatcher fields cannot bypass policy checks', () => {
-  for (const args of [
-    {},
-    { toolset_name: dataTable },
-    { toolset_name: 'Safe', toolsetName: dataTable, tool_name: 'set_rows' },
-    { toolset_name: 'Safe', tool_name: 'get_rows', toolName: 'execute_tool_script' },
-  ]) denied({ name: 'call_tool', arguments: args }, 'invalid_tool_dispatch');
-});
-
-test('does not confuse ordinary Blueprint names or argument text with executable MCP tools', () => {
-  for (const tool of ['Click', 'OnClicked', 'AddOnClickNode', 'set_rows', 'DataTableToolsInfo']) {
-    assert.equal(assertSafeMcpCall(callTool('editor_toolset.toolsets.blueprint.BlueprintTools', tool, { name: 'SlateInspectorToolset.Click', script: 'execute_tool_script' })), undefined);
-  }
-  const call = callTool(dataTable, 'get_rows', { row_names: ['Click', 'execute_tool_script'], nested: { tool_name: 'set_rows' } });
-  const before = structuredClone(call);
-  Object.freeze(call.arguments.arguments);
-  assertSafeMcpCall(call);
-  assert.deepEqual(call, before);
-  assert.equal(assertSafeMcpCall({ name: 'describe_toolset', arguments: { toolset_name: programmatic } }), undefined);
+  assert.match(mcpAccess(`${programmatic}.execute_tool_script`).note,/Inner calls/);
+  assert.equal(mcpAccess(`${slate}.Click`).available,true);
+  assert.equal(mcpAccess(`${slate}.Click`,{allowDesktopInput:false}).available,false);
+  assert.equal(mcpAccess(`${slate}.Snapshot`,{allowDesktopInput:false}).available,true);
 });

@@ -44,39 +44,8 @@ public:
         const FString& RequestId, TFunction<void(TSharedPtr<FJsonObject>)> OnComplete,
         FString& Error) override
     {
-        FString ToolsetName;
-        FString ToolName;
-        if (Arguments)
-        {
-            Arguments->TryGetStringField(TEXT("toolset_name"), ToolsetName);
-            Arguments->TryGetStringField(TEXT("tool_name"), ToolName);
-        }
-        const bool bScriptTool = Name.Contains(TEXT("ProgrammaticToolset"), ESearchCase::IgnoreCase)
-            || ToolsetName.Contains(TEXT("ProgrammaticToolset"), ESearchCase::IgnoreCase)
-            || Name.Contains(TEXT("execute_tool_script"), ESearchCase::IgnoreCase)
-            || ToolName.Contains(TEXT("execute_tool_script"), ESearchCase::IgnoreCase);
-        if (bScriptTool)
-        {
-            Error = TEXT("Script-execution MCP tools are disabled; use a specific UE asset tool instead");
-            return false;
-        }
-        if (ToolsetName.Contains(TEXT("AssetTools"), ESearchCase::IgnoreCase)
-            && ToolName.Equals(TEXT("write_file"), ESearchCase::IgnoreCase) && Arguments)
-        {
-            const TSharedPtr<FJsonObject>* ToolArguments = nullptr;
-            FString FilePath;
-            if (Arguments->TryGetObjectField(TEXT("arguments"), ToolArguments) && ToolArguments && ToolArguments->IsValid())
-            {
-                (*ToolArguments)->TryGetStringField(TEXT("file_path"), FilePath);
-            }
-            if (FilePath.EndsWith(TEXT(".py"), ESearchCase::IgnoreCase)
-                || FilePath.EndsWith(TEXT(".js"), ESearchCase::IgnoreCase)
-                || FilePath.EndsWith(TEXT(".ps1"), ESearchCase::IgnoreCase))
-            {
-                Error = TEXT("Writing scripts through UE MCP is disabled; use a specific asset tool instead");
-                return false;
-            }
-        }
+        // Expose the complete registered UE catalog. The bridge validates and
+        // admits requests before dispatch; leaf semantics belong to the UE tool.
         IModelContextProtocolModule* MCP = IModelContextProtocolModule::Get();
         if (!MCP)
         {

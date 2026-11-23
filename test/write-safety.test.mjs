@@ -168,15 +168,17 @@ test('UE FString JSON errors are failures and cannot bypass write locks',async t
   assert.equal(bridge.state('chat').writeLock.rollback,'failed');
 });
 
-test('unsafe DataTable and desktop MCP routes are rejected before dispatch',async t=>{
-  const bridge=await fixture(t);const calls=await editor(bridge,message=>({ok:true,result:message.method==='mcp_discover'?{content:[{type:'text',text:JSON.stringify({tools:[{name:'DataTableTools.get_rows',inputSchema:{type:'object',properties:{}}}]})}]}:{}}));
+test('formerly blocked MCP operations execute once with current schema validation and write admission',async t=>{
+  const bridge=await fixture(t);const calls=await editor(bridge,message=>({ok:true,result:message.method==='mcp_discover'?{content:[{type:'text',text:JSON.stringify({tools:['set_rows','add_rows','rename_rows','Click','execute_tool_script','get_rows'].map(name=>({name,inputSchema:{type:'object',properties:{}}}))})}]}:{}}));
   for(const [toolsetName,toolName] of [['DataTableTools','set_rows'],['DataTableTools','add_rows'],['DataTableTools','rename_rows'],['SlateInspectorToolset','Click'],['ProgrammaticToolset','execute_tool_script']]){
-    await assert.rejects(bridge.mcpCallToolset('chat',{toolsetName,toolName,arguments:{},requestId:randomUUID()}),{code:'MCP_POLICY_BLOCKED'});
+    const args={toolsetName,toolName,arguments:{},requestId:randomUUID()};
+    assert.deepEqual(await bridge.mcpCallToolset('chat',args),{});
+    assert.deepEqual(await bridge.mcpCallToolset('chat',args),{});
+    await assert.rejects(bridge.mcpCallToolset('chat',{...args,arguments:{invalid:true},requestId:randomUUID()}),{code:'MCP_INVALID_ARGUMENTS'});
   }
-  await assert.rejects(bridge.mcpCall('chat',{name:'editor_toolset.toolsets.data_table.DataTableTools.set_rows',arguments:{},requestId:randomUUID()}),{code:'MCP_POLICY_BLOCKED'});
-  assert.equal(calls.length,0);
-  assert.deepEqual(await bridge.mcpCallToolset('chat',{toolsetName:'DataTableTools',toolName:'get_rows',arguments:{},requestId:randomUUID()}),{});
-  assert.equal(calls.filter(call=>call.method==='mcp_call_tool').length,1);
+  assert.equal(calls.filter(call=>call.method==='mcp_call_tool').length,5);
+  bridge.config.allowWrites=false;
+  await assert.rejects(bridge.mcpCallToolset('chat',{toolsetName:'ProgrammaticToolset',toolName:'execute_tool_script',arguments:{},requestId:randomUUID()}),{code:'READ_ONLY'});
 });
 
 test('native copy dispatch is atomic, idempotent and does not request save or focus',async t=>{
@@ -261,16 +263,16 @@ test('a failed rollback recovered after timeout still locks writes and preserves
   assert.equal(calls.length,2);
 });
 
-test('plugin wrapper rejects a blocked route but permits its safe native alternative in the same turn',async t=>{
+test('plugin wrapper honors explicit desktop restriction while permitting native writes in the same turn',async t=>{
   const tools=new Map(),services=new Map(),cancellations=[];
   const stateDir=await mkdtemp(join(tmpdir(),'dsh-write-guard-plugin-'));
   const ctx={tools:{register:tool=>tools.set(tool.name,tool)},systemPrompt:{section(){}},typert:{register(){}},provide:(name,value)=>services.set(name,value),get:()=>undefined,effect:()=>{}};
-  await apply(ctx,{port:0,stateDir,requireApproval:false});
+  await apply(ctx,{port:0,stateDir,requireApproval:false,allowMcpDesktopInput:false});
   const bridge=services.get('unrealBridge').bridge;
   t.after(async()=>{await bridge.close();await rm(stateDir,{recursive:true,force:true});});
   const calls=await editor(bridge,()=>({ok:true,result:copied}));
   const exec={agent:{session:{id:'chat'},cancel:(...args)=>cancellations.push(args)},name:'unreal_mcp_call_toolset',callId:'first',signal:new AbortController().signal};
-  const blocked=await tools.get(exec.name).execute({toolsetName:'DataTableTools',toolName:'set_rows',requestId:randomUUID()},exec);
+  const blocked=await tools.get(exec.name).execute({toolsetName:'SlateInspectorToolset',toolName:'Click',requestId:randomUUID()},exec);
   assert.equal(blocked.ok,false);assert.equal(blocked.error.code,'MCP_POLICY_BLOCKED');assert.equal(cancellations.length,0);
   assert.equal(blocked.error.details.retryable,false);assert.equal(calls.length,0);
   const next=await tools.get('unreal_data_table_copy_property').execute(copy(),{...exec,name:'unreal_data_table_copy_property',callId:'second'});

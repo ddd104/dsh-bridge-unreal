@@ -6,7 +6,7 @@ import { join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { WebSocketServer, WebSocket } from 'ws';
 import { VERSION, helloSchema, selectionSchema, patchSchema, createSchema, readSchema, focusSchema, catalogSchema, knowledgeSchema, knowledgeRecordSchema, mcpCallSchema, mcpDescribeSchema, mcpToolsetCallSchema, dataTableCopySchema, runtimeChangedSchema, runtimeSnapshotSchema, runtimeSnapshotResultSchema, runtimeHistorySchema, fail, BridgeError } from './protocol.mjs';
-import { assertSafeMcpCall } from './mcp-policy.mjs';
+import { assertSafeMcpCall, mcpAccess } from './mcp-policy.mjs';
 import {levelBlueprintSchema} from './protocol.mjs';
 import {materialReadSchema,materialPatchSchema} from './protocol.mjs';
 import {dataTablePatchSchema,dataTableWriteRowsSchema,dataTableManageRowsSchema,dataTableAddRowsSchema} from './protocol.mjs';
@@ -254,14 +254,14 @@ export class UnrealBridge extends EventEmitter {
     const {toolsetName,query,includeSchema}=mcpDescribeSchema.parse(args);
     const result=await this.request(this.mcpTarget(sessionId),'mcp_discover',{name:'describe_toolset',arguments:{toolset_name:toolsetName}},{signal});
     const {block,description}=describeTools(result,toolsetName);
-    const found=description.tools.filter(tool=>!query||tool.fullName.toLowerCase().includes(query.toLowerCase()));
-    const tools=includeSchema?found:found.map(({name,fullName,toolsetName,description})=>({name,fullName,toolsetName,description:description?.split('\n')[0]?.slice(0,180)??''}));
+    const found=description.tools.filter(tool=>!query||tool.fullName.toLowerCase().includes(query.toLowerCase())).map(tool=>({...tool,bridge:{...mcpAccess(tool.fullName,{allowDesktopInput:this.config.allowMcpDesktopInput}),readOnly:isReadOnlyMcpCall({name:tool.fullName})}}));
+    const tools=includeSchema?found:found.map(({name,fullName,toolsetName,description,bridge})=>({name,fullName,toolsetName,description:description?.split('\n')[0]?.slice(0,180)??'',bridge}));
     return {...result,content:result.content.map(item=>item===block?{...item,text:JSON.stringify({...description,tools})}:item)};
   }
   async mcpCall(sessionId,args,signal,admit){
     const {name,arguments:toolArgs,requestId}=mcpCallSchema.parse(args),editor=this.mcpTarget(sessionId),bindingVersion=this.bindingVersions.get(sessionId);
     let call={name,arguments:toolArgs};
-    assertSafeMcpCall(call,{allowDesktopInput:this.config.allowMcpDesktopInput===true});
+    assertSafeMcpCall(call,{allowDesktopInput:this.config.allowMcpDesktopInput});
     let toolsetName,toolName;
     if(name.toLowerCase()==='call_tool'){
       toolsetName=toolArgs.toolset_name??'';
@@ -276,7 +276,7 @@ export class UnrealBridge extends EventEmitter {
       }
     }
     // Normalization can expose a nested dispatcher hidden by its full prefix.
-    assertSafeMcpCall(call,{allowDesktopInput:this.config.allowMcpDesktopInput===true});
+    assertSafeMcpCall(call,{allowDesktopInput:this.config.allowMcpDesktopInput});
     if((toolName??call.name).split('.').at(-1).toLowerCase()==='call_tool'&&toolName)fail('MCP_TARGET_UNSUPPORTED','Nested MCP dispatchers cannot verify their final target; call the discovered leaf tool directly',{execution:'not_started',retryable:true});
     const mcpReadOnly=isReadOnlyMcpCall(call);
     // Cached outcomes and existing write barriers take precedence over discovery.

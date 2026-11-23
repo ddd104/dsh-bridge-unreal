@@ -14,7 +14,7 @@ const fields = Object.fromEntries(FIELD_SPECS.map(field => [
 export const Config = Schema.object({
   port: Schema.number().step(1).min(0).max(65535).default(17891),
   stateDir: Schema.string().min(1),
-  allowMcpDesktopInput: Schema.boolean().default(false),
+  allowMcpDesktopInput: Schema.boolean().default(true),
   ...fields,
 });
 

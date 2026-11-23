@@ -1,7 +1,7 @@
 {
   "FileVersion": 3,
-  "Version": 14,
-  "VersionName": "0.5.4",
+  "Version": 15,
+  "VersionName": "0.5.5",
   "FriendlyName": "DSH Unreal Bridge",
   "Description": "Authenticated DSH bridge with level Blueprint lookup, PIE inspection, UE MCP tools, project knowledge and viewport comparison.",
   "Category": "Editor",
@@ -12,5 +12,10 @@
     {"Name":"DSHUnrealBridgeKnowledge","Type":"EditorNoCommandlet","LoadingPhase":"PostEngineInit","PlatformAllowList":["Win64"]},
     {"Name":"DSHUnrealBridge","Type":"Editor","LoadingPhase":"PostEngineInit"}
   ],
-  "Plugins": [{"Name":"ModelContextProtocol","Enabled":true},{"Name":"ToolsetRegistry","Enabled":true}]
+  "Plugins": [
+    {"Name":"ModelContextProtocol","Enabled":true},
+    {"Name":"ToolsetRegistry","Enabled":true},
+    {"Name":"EditorToolset","Enabled":true,"TargetAllowList":["Editor"]},
+    {"Name":"SlateInspectorToolset","Enabled":true,"TargetAllowList":["Editor"]}
+  ]
 }

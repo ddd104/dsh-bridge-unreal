@@ -148,9 +148,9 @@ test('UE MCP toolset descriptions can be filtered before reaching the model',asy
   await editor(bridge,'UE1',message=>({content:[{type:'text',text:JSON.stringify(description)}]}),['mcp_tools']);
   bridge.bind('chat','UE1');
   const compact=await bridge.mcpDescribe('chat',{toolsetName:'BlueprintTools',query:'add_event',includeSchema:false});
-  assert.deepEqual(JSON.parse(compact.content[0].text).tools,[{name:'add_event',fullName:'BlueprintTools.add_event',toolsetName:'BlueprintTools',description:'Add an event.'}]);
+  assert.deepEqual(JSON.parse(compact.content[0].text).tools,[{name:'add_event',fullName:'BlueprintTools.add_event',toolsetName:'BlueprintTools',description:'Add an event.',bridge:{available:true,readOnly:false}}]);
   const exact=await bridge.mcpDescribe('chat',{toolsetName:'BlueprintTools',query:'add_event'});
-  assert.deepEqual(JSON.parse(exact.content[0].text).tools,[{...description.tools[0],name:'add_event',fullName:'BlueprintTools.add_event',toolsetName:'BlueprintTools'}]);
+  assert.deepEqual(JSON.parse(exact.content[0].text).tools,[{...description.tools[0],name:'add_event',fullName:'BlueprintTools.add_event',toolsetName:'BlueprintTools',bridge:{available:true,readOnly:false}}]);
 });
 
 test('project knowledge queries stay on the bound editor and require its capability',async t=>{

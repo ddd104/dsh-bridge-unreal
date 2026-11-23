@@ -2,7 +2,7 @@
 
 DeepSeek Harness（DSH）的 Unreal Editor 桥接插件。每个对话可以独立绑定本机 UE 编辑器，显示手动添加的候选资产和独立的 Actor、组件实时选区，并使用蓝图、材质、DataTable、MCP、项目知识、运行快照和图像分析工具。
 
-本仓库提供 **DSH 端插件**安装入口，版本为 **0.6.4**，同步原仓库 0.6.4 的实现，适配 DSH **0.2.1-rc.2**。UE 工程侧需要另外将 [DSHUnrealBridge 0.5.4 插件](./unreal/DSHUnrealBridge)导入项目、编译并启用。
+本仓库提供 **DSH 端插件**安装入口，版本为 **0.6.5**，同步原仓库 0.6.5 的实现，适配 DSH **0.2.1-rc.2**。UE 工程侧需要另外将 [DSHUnrealBridge 0.5.5 插件](./unreal/DSHUnrealBridge)导入项目、编译并启用。
 
 本文中的 `./` 表示本仓库根目录，命令默认在该目录执行。UE 工程内的路径以 `.uproject` 所在目录为基准；插件内部路径会单独说明。
 
@@ -54,7 +54,7 @@ github:ddd104/dsh-bridge-unreal
 
 在同一“添加插件”输入框中填入该目录的实际完整路径，点击安装并启用插件。安装位置应指向仓库根目录，不是 `./src/`、`./lib/` 或 UE 工程的插件目录。
 
-也可以使用已生成的 `./dist/dsh/dsh-unreal-bridge-0.6.4.tgz`，将该文件的实际完整路径填入安装框。安装包生成和独立交付方法见[发行说明](./docs/dsh-release.md)。
+也可以使用已生成的 `./dist/dsh/dsh-unreal-bridge-0.6.5.tgz`，将该文件的实际完整路径填入安装框。安装包生成和独立交付方法见[发行说明](./docs/dsh-release.md)。
 
 仓库根目录已经包含插件声明、`./cordis.patch.yml` 和编译好的 `./lib/index.js`、`./lib/client.js`、`./lib/remote.js`。安装用户无需运行 npm、编译源代码或执行批处理；下载依赖仍需要网络。仓库地址安装使用远端提交，因此本地修改必须先推送到 GitHub 才能被其他机器下载。
 
@@ -72,7 +72,7 @@ github:ddd104/dsh-bridge-unreal
 2. 在 `.uproject` 文件所在的项目根目录创建 `Plugins` 文件夹；已存在时直接使用。
 3. 将本仓库 `./unreal/DSHUnrealBridge/` **整个文件夹**复制到项目的 `Plugins` 下，确保插件描述文件位于 `Plugins/DSHUnrealBridge/DSHUnrealBridge.uplugin`。不要只复制 `.uplugin` 文件，也不要将插件放进 `Content` 或通过内容浏览器导入。
 4. 使用 **UE 5.8** 和对应的 C++ 构建环境编译项目的 Editor 目标，再打开项目。如果提示模块缺失或需要重新编译，先完成编译；不能使用其他 UE 版本的插件 DLL。
-5. 在 UE 的 **编辑 → 插件（Edit → Plugins）** 中搜索并启用 **DSH Unreal Bridge**。插件声明依赖 `ModelContextProtocol` 与 `ToolsetRegistry`；需要通用 UE MCP 操作时，工程还应启用所需工具集，例如原仓库使用的 `AllToolsets`。按 UE 提示重启编辑器。
+5. 在 UE 的 **编辑 → 插件（Edit → Plugins）** 中搜索并启用 **DSH Unreal Bridge**。插件声明依赖 `ModelContextProtocol`、`ToolsetRegistry`，并为 Editor 目标启用 `EditorToolset` 与 `SlateInspectorToolset`，提供核心蓝图、材质及 Slate 工具。其他领域按需启用相应工具集，完整目录取决于工程实际配置。按 UE 提示重启编辑器。
 
 导入后的目录结构应为：
 
@@ -106,7 +106,9 @@ MyProject/
 
 原仓库的 `install-dsh.bat` 同时处理旧版 DSH 安装流程；已通过本仓库安装 DSH 端时，可按上面的步骤单独准备 UE 端。
 
-本次两端同步增加了 DataTable 逐行写入、新增、改名、删除、复制、清空，以及嵌套 Map/数组元素删除能力；支持默认预览、整批校验、失败回滚和撤销/重做，提交后不自动保存。新增的手动候选列表需要 DSH 0.6.4 与 UE 0.5.4 配套使用。使用这些能力需要同时更新 DSH 端并重新编译 UE 端；参数说明见[工具与通信协议](./docs/protocol.md)。
+本次两端同步至 DSH 0.6.5 / UE 0.5.5，默认开放当前 UE 注册的全部 MCP 叶子工具，包括脚本执行、Slate 交互和旧 DataTable 写入接口；工具描述增加可用性、只读属性及替代工具建议。新增 21 项精确只读查询，两端共使用 40 项只读名单。源仓库目录快照覆盖 52 个工具集、830 个叶子工具，实际数量以绑定工程为准，详见 [UE MCP 开放审计](./docs/mcp-coverage.md)。
+
+DataTable 原生逐行写入、新增、改名、删除、复制、清空及嵌套容器修改继续支持预览、整批校验、失败回滚和撤销/重做，提交后不自动保存；局部修改优先使用这些原生工具。旧 MCP DataTable 写入会经 JSON 重写整表，脚本内部调用和其他通用 MCP 操作不具备原生补丁的逐项预览与统一回滚保证。参数说明见[工具与通信协议](./docs/protocol.md)。
 
 ## 第三步：绑定编辑器并添加候选资产
 
@@ -176,6 +178,7 @@ MyProject/
 在 **DSH 设置 → Unreal Bridge** 或插件行的配置入口调整执行权限、修复次数、任务预算、超时与缓存保留。
 
 - 初次安装的 bundle 配置允许写入，原生写入批准选项为关闭。只读体验可关闭“允许修改 UE 资产和项目知识”；需要原生写入确认时开启“原生写入前请求批准”，其适用范围见设置说明。
+- 0.6.5 默认允许 Slate 桌面交互；宿主配置中显式设置 `allowMcpDesktopInput: false` 仍会限制直接桌面输入并保留观察能力。该项属于静态宿主配置，不在热更新设置表单内。
 - 权限与超时从下一次请求生效；预算和修复限制从下一轮用户任务生效。保存缓存设置本身不会删除文件。
 - 升级 DSH 端时，按 DSH 插件页支持的更新或卸载重装流程操作，完成后重新打开 DSH。本地源码修改需重新构建并重新安装；GitHub 安装读取远端已推送的版本。
 - 新功能如果报告 UE 能力不足，需要另外更新并重新编译 UE 插件，然后重启工程。
