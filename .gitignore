@@ -1,5 +1,3 @@
-node_modules/
-dist/
 .test-state/
 *.tgz
 *.log
@@ -15,5 +13,13 @@ unreal/**/Saved/
 unreal/**/DerivedDataCache/
 unreal/**/Cache/
 unreal/**/Runtime/
+# Ship the pinned runtime and compiled knowledge tools with the UE plugin.
+!unreal/DSHUnrealBridge/Runtime/
+unreal/DSHUnrealBridge/Runtime/*
+!unreal/DSHUnrealBridge/Runtime/Win64/
+unreal/DSHUnrealBridge/Runtime/Win64/*
+!unreal/DSHUnrealBridge/Runtime/Win64/node.exe
+!unreal/DSHUnrealBridge/Tools/ProjectGraph/dist/
+!unreal/DSHUnrealBridge/Tools/ProjectMemorySystem/dist/
 *.pdb
 .vs/

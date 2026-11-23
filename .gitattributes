@@ -1,8 +1,11 @@
 * text=auto eol=lf
 *.png binary
 *.dll binary
+*.exe binary
 *.zip binary
 *.tgz binary
 # Generated bundles preserve third-party template-string indentation.
 lib/*.js linguist-generated=true whitespace=-blank-at-eol
 lib/*.map linguist-generated=true
+unreal/DSHUnrealBridge/Tools/ProjectGraph/dist/** linguist-generated=true whitespace=-blank-at-eol
+unreal/DSHUnrealBridge/Tools/ProjectMemorySystem/dist/** linguist-generated=true whitespace=-blank-at-eol
