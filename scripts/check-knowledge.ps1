@@ -31,9 +31,12 @@ if ($LASTEXITCODE -ne 0 -or $version -ne 'v24.15.0') {
     throw "Bundled Node runtime could not report v24.15.0: $version"
 }
 # Importing the worker validates its transitive dist dependencies without starting
-# a request, creating project caches, or connecting to the editor.
+# a request, creating project caches, or connecting to the editor. The file URL keeps
+# the module in import mode, so the check does not depend on the current directory and
+# never starts the JSONL CLI entry point.
 $workerPath = Join-Path $PluginRoot 'Tools/knowledge-worker.mjs'
-& $nodePath --input-type=module -e "const { pathToFileURL } = await import('node:url'); await import(pathToFileURL(process.argv[1]).href);" $workerPath
+$workerUrl = ([uri](Resolve-Path -LiteralPath $workerPath).Path).AbsoluteUri
+& $nodePath --input-type=module -e "await import(process.argv[1]);" $workerUrl
 if ($LASTEXITCODE -ne 0) { throw 'Knowledge worker dependency validation failed.' }
 if ($RunTests) {
     & $nodePath (Join-Path $PluginRoot 'Tools/test.mjs')
