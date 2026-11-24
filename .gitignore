@@ -1,6 +1,5 @@
 node_modules/
 .test-state/
-*.tgz
 *.log
 .env
 .env.*
