@@ -1,0 +1,9 @@
+DSH Unreal Bridge 0.6.5
+
+1. Install DeepSeek Harness.
+2. Double-click install-dsh.bat.
+3. Fully exit DSH (including the tray) and reopen it.
+
+The installer defaults to the desktop profile and needs no project source or system Node.js.
+Internet access may be required to install npm dependencies.
+Compiled JavaScript remains readable; this package is not source encryption.
