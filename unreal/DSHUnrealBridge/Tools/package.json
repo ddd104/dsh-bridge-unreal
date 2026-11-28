@@ -17,7 +17,10 @@
   },
   "dependencies": {
     "@e965/xlsx": "^0.20.3",
-    "protobufjs": "^8.8.1"
+    "@thednp/dommatrix": "3.1.4",
+    "pdfjs-dist": "6.5.438",
+    "protobufjs": "^8.8.1",
+    "yaml": "2.8.2"
   },
   "devDependencies": {
     "esbuild": "^0.25.12"

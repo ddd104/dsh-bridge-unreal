@@ -82,7 +82,7 @@ export const materialPatchSchema=z.object({
   cleanupNodeIds:z.array(id).max(256).optional().describe('Only these explicitly authorized candidates may be removed if proven unused; other disconnected nodes are preserved.'),
   requestId:z.string().uuid()
 }).strict();
-export const knowledgeSchema = z.object({tool:z.enum(['project_status','project_context','project_search','graph_query','graph_feature','graph_impact','read_source','validate_evidence','read_asset_snapshot','search_asset_snapshots','asset_snapshot','inspect_asset','experience_lookup']),arguments:mcpArguments.default({})}).strict();
+export const knowledgeSchema = z.object({tool:z.enum(['project_status','project_context','project_search','graph_query','graph_feature','graph_impact','read_source','validate_evidence','read_asset_snapshot','search_asset_snapshots','snapshot_export_start','snapshot_export_status','snapshot_export_cancel','asset_snapshot','inspect_asset','experience_lookup']),arguments:mcpArguments.default({})}).strict();
 export const knowledgeRecordSchema = z.object({tool:z.enum(['remember_evidence','experience_save','experience_feedback']),arguments:mcpArguments,requestId:z.string().uuid()}).strict();
 export const imageRegionSchema=z.object({x:z.number().int().min(0),y:z.number().int().min(0),width:z.number().int().min(1).max(16384),height:z.number().int().min(1).max(16384)}).strict();
 const rgbSchema=z.tuple([z.number().int().min(0).max(255),z.number().int().min(0).max(255),z.number().int().min(0).max(255)]);

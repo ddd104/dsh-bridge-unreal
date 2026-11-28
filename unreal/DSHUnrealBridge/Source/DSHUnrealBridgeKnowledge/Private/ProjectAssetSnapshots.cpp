@@ -565,6 +565,7 @@ bool FProjectKnowledgeService::EndAssetSnapshotScan(const TArray<FString>& Asset
 TSharedPtr<FJsonObject> FProjectKnowledgeService::ExecuteSnapshotTool(const FString& Tool, const TSharedPtr<FJsonObject>& Args)
 {
     using namespace ProjectAssetSnapshots;
+    if (Tool.StartsWith(TEXT("snapshot_export_"))) return FDSHUnrealBridgeKnowledgeModule::ExecuteSnapshotExport(Tool, Args);
     double Offset = 0, Limit = 64;
     if ((Args->HasField(TEXT("offset")) && !Args->TryGetNumberField(TEXT("offset"), Offset)) ||
         (Args->HasField(TEXT("limit")) && !Args->TryGetNumberField(TEXT("limit"), Limit)) || Offset < 0 || Offset > MAX_int32 || Limit < 1 || Limit > 200 || Offset != FMath::FloorToDouble(Offset) || Limit != FMath::FloorToDouble(Limit))

@@ -120,7 +120,7 @@ test('material preview defaults to a verified transient operation and remains av
 });
 
 test('material commits use the configured approval policy while previews never request approval',async t=>{
-  const f=await toolFixture(t),ue=await editor(f.bridge);f.bridge.bind('chat','UE');
+  const f=await toolFixture(t,{requireApproval:true}),ue=await editor(f.bridge);f.bridge.bind('chat','UE');
   assert.equal((await f.execute('unreal_material_patch',patch())).ok,true);
   assert.equal(f.approvalRequests(),0);
   const denied=await f.execute('unreal_material_patch',patch({dryRun:false}));

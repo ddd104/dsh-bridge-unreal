@@ -33,6 +33,7 @@ export async function updateMemory(options = {}) {
             configPath: loaded.configPath,
             memoryOutputRoot: loaded.config.memoryOutputRoot,
             documentsIndexed: indexResult.documentsIndexed,
+            chunksIndexed: indexResult.chunksIndexed,
             changedSources: indexResult.changedSources,
             unchangedSources: indexResult.unchangedSources,
             removedSources: indexResult.removedSources,

@@ -26852,22 +26852,41 @@ function parseXls(content) {
     cellFormula: false,
     cellHTML: false,
     cellStyles: false,
-    dense: true,
+    dense: false,
     WTF: true
   });
   const lines = [];
+  const blocks = [];
   for (const name of workbook.SheetNames) {
     lines.push(`# ${name}`);
     const sheet = workbook.Sheets[name];
-    if (!sheet)
+    if (!sheet?.["!ref"])
       continue;
-    const tabular = utils.sheet_to_csv(sheet, { FS: "	", RS: "\n", blankrows: false }).trim();
-    if (tabular)
-      lines.push(tabular);
+    const range = utils.decode_range(sheet["!ref"]);
+    if ((range.e.r - range.s.r + 1) * (range.e.c - range.s.c + 1) > 2e6)
+      throw new Error(`Worksheet ${name} exceeds the 2 million cell extraction limit.`);
+    let headerText, headerRange;
+    for (let row = range.s.r; row <= range.e.r; row++) {
+      const values = [];
+      for (let col = range.s.c; col <= range.e.c; col++) {
+        const cell = sheet[utils.encode_cell({ r: row, c: col })];
+        values.push(cell ? utils.format_cell(cell).replace(/\r\n/g, "\n") : "");
+      }
+      if (!values.some((value) => value.trim()))
+        continue;
+      const text = values.join("	"), startColumn = utils.encode_col(range.s.c), endColumn = utils.encode_col(range.e.c);
+      const address = `${startColumn}${row + 1}:${endColumn}${row + 1}`;
+      if (headerText === void 0) {
+        headerText = text;
+        headerRange = address;
+      }
+      blocks.push({ text, kind: "table", headingPath: [name], location: { kind: "sheet", sheet: name, startRow: row + 1, endRow: row + 1, startColumn, endColumn, range: address, headerRange, headerText } });
+      lines.push(text);
+    }
   }
   if (!workbook.SheetNames.length)
     throw new Error("Excel workbook contains no worksheets.");
-  return { text: lines.join("\n"), sheetNames: workbook.SheetNames };
+  return { text: lines.join("\n"), sheetNames: workbook.SheetNames, blocks };
 }
 export {
   parseXls

@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { discoverDocumentSources } from "../index/documentIndexer.js";
+import { DOCUMENT_INDEX_VERSION, PARSER_VERSION, chunkPolicy, policyFingerprint } from "../index/documentChunks.js";
 import type { LoadedProjectConfig } from "../types/memoryTypes.js";
 import {
   signatureSetsEqual,
@@ -79,12 +80,14 @@ async function fileSignature(projectRoot: string, filePath: string): Promise<Fil
     path: toProjectPath(projectRoot, filePath),
     hash,
     modifiedAt: stats.mtime.toISOString(),
-    size: stats.size
+    size
   };
 }
 
 async function existingCacheFiles(loaded: LoadedProjectConfig): Promise<MemoryManifestCacheFile[]> {
   const candidates: Array<{ kind: MemoryManifestCacheFile["kind"]; path: string }> = [
+    { kind: "document_warnings", path: path.join(loaded.resolvedMemoryOutputRoot, "index", "document-warnings.json") },
+    { kind: "chunks_jsonl", path: path.join(loaded.resolvedMemoryOutputRoot, "index", "chunks.jsonl") },
     {
       kind: "documents_jsonl",
       path: path.join(loaded.resolvedMemoryOutputRoot, "index", "documents.jsonl")
@@ -155,6 +158,9 @@ export class MemoryStore {
   async createManifest(loaded: LoadedProjectConfig, sources: MemoryManifestSource[]): Promise<MemoryManifest> {
     return {
       schemaVersion: 1,
+      documentIndexVersion: DOCUMENT_INDEX_VERSION,
+      parserVersion: PARSER_VERSION,
+      chunkingFingerprint: policyFingerprint(chunkPolicy(loaded.config)),
       projectId: loaded.config.projectId,
       generatedAt: new Date().toISOString(),
       projectConfigHash: await hashFile(loaded.configPath),
@@ -186,7 +192,7 @@ export class MemoryStore {
       };
     }
 
-    if (manifest.schemaVersion !== 1 || manifest.projectId !== loaded.config.projectId) {
+    if (manifest.schemaVersion !== 1 || manifest.projectId !== loaded.config.projectId || manifest.documentIndexVersion !== DOCUMENT_INDEX_VERSION || manifest.parserVersion !== PARSER_VERSION) {
       return {
         status: "needs_full_rebuild",
         manifestPath,
@@ -194,12 +200,12 @@ export class MemoryStore {
         sourceCount: manifest.sources.length,
         cacheFiles: manifest.cacheFiles ?? [],
         graphFiles: manifest.graphFiles ?? [],
-        warnings: ["Manifest schema version or projectId does not match the current project."]
+        warnings: ["Manifest project or document parser/index version does not match. Explicitly update the base index; legacy full-text queries remain available."]
       };
     }
 
     const projectConfigHash = await hashFile(loaded.configPath);
-    if (manifest.projectConfigHash !== projectConfigHash) {
+    if (manifest.projectConfigHash !== projectConfigHash || manifest.chunkingFingerprint !== policyFingerprint(chunkPolicy(loaded.config))) {
       return {
         status: "stale_config",
         manifestPath,
@@ -213,7 +219,7 @@ export class MemoryStore {
     }
 
     const cacheFiles = await existingCacheFiles(loaded);
-    if (!signatureSetsEqual(manifest.cacheFiles ?? [], cacheFiles) || cacheFiles.length < 2) {
+    if (!signatureSetsEqual(manifest.cacheFiles ?? [], cacheFiles) || cacheFiles.length < 3) {
       return {
         status: "needs_full_rebuild",
         manifestPath,

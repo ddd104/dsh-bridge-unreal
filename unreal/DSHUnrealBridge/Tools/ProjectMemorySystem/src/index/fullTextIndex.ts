@@ -1,120 +1,93 @@
 import { DatabaseSync } from "node:sqlite";
-import type { DocumentRecord, MemorySearchResult } from "../types/memoryTypes.js";
+import type { DocumentRecord, KnowledgeChunk, MemorySearchResult } from "../types/memoryTypes.js";
+import { chunkDocument, chunkPolicy } from "./documentChunks.js";
+import { textBlocks } from "../sources/textStructure.js";
 
-interface FtsRow {
-  id: string;
-  path: string;
-  sourceType: string;
-  title: string;
-  excerpt: string;
-  score: number;
+const quote = (value: string) => `"${value.replaceAll('"', '""')}"`;
+const han = /[\p{Script=Han}]+/gu;
+const term = (value: string) => `h${[...value].map(char => char.codePointAt(0)!.toString(16)).join("x")}`;
+function pairs(value: string): string[] { const chars = [...value]; return chars.slice(1).map((_char, i) => term(chars[i] + chars[i + 1])); }
+function hanTerms(value: string): string {
+  return [...value.matchAll(han)].map(match => [...pairs(match[0]), ...[...match[0]].map(term)].join(" ")).join(" boundary ");
 }
-
-function escapeFtsQuery(query: string): string {
-  return query
-    .split(/\s+/)
-    .map((token) => token.trim())
-    .filter(Boolean)
-    .map((token) => `"${token.replace(/"/g, "\"\"")}"`)
-    .join(" ");
+function queryTerms(query: string): string {
+  return (query.normalize("NFC").match(/[\p{Script=Han}]+|[^\p{Script=Han}\s]+/gu) ?? []).filter(value => /[\p{L}\p{N}]/u.test(value)).map(value =>
+    /^[\p{Script=Han}]+$/u.test(value) ? `terms:${quote([...value].length > 1 ? pairs(value).join(" ") : term(value))}` : `{title text metadataText}: ${quote(value)}`
+  ).join(" AND ");
+}
+function searchMetadata(document: DocumentRecord): string {
+  return [document.path, ...["aliases", "tags", "sources", "symbols", "assets", "relatedPages", "messages", "enums", "services"].flatMap(key => Array.isArray(document.metadata[key]) ? document.metadata[key] as string[] : [])].join(" ");
 }
 
 export class FullTextIndex {
   private constructor(private readonly db: DatabaseSync) {}
-
   static create(databasePath: string): FullTextIndex {
-    const db = new DatabaseSync(databasePath);
-    const index = new FullTextIndex(db);
-    index.initialize();
-    return index;
+    const index = new FullTextIndex(new DatabaseSync(databasePath));index.initialize();return index;
   }
-
-  static open(databasePath: string): FullTextIndex {
-    return new FullTextIndex(new DatabaseSync(databasePath));
-  }
-
+  static open(databasePath: string): FullTextIndex { return new FullTextIndex(new DatabaseSync(databasePath, { readOnly: true })); }
+  get supportsChunks(): boolean { return !!this.db.prepare("SELECT name FROM sqlite_master WHERE name = 'knowledge_chunks'").get(); }
   private initialize(): void {
     this.db.exec(`
-      CREATE TABLE IF NOT EXISTS documents (
-        id TEXT PRIMARY KEY,
-        path TEXT NOT NULL,
-        sourceType TEXT NOT NULL,
-        title TEXT NOT NULL,
-        hash TEXT NOT NULL,
-        modifiedAt TEXT NOT NULL,
-        metadata TEXT NOT NULL
-      );
-      CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts USING fts5(
-        id UNINDEXED,
-        path UNINDEXED,
-        sourceType UNINDEXED,
-        title,
-        text,
-        tokenize = 'unicode61'
-      );
+      CREATE TABLE IF NOT EXISTS documents (id TEXT PRIMARY KEY, path TEXT NOT NULL, sourceType TEXT NOT NULL, title TEXT NOT NULL, hash TEXT NOT NULL, modifiedAt TEXT NOT NULL, metadata TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS document_records (id TEXT PRIMARY KEY, record TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS knowledge_chunks (id TEXT PRIMARY KEY, documentId TEXT NOT NULL, ordinal INTEGER NOT NULL, record TEXT NOT NULL);
+      CREATE INDEX IF NOT EXISTS chunks_by_document ON knowledge_chunks(documentId, ordinal);
+      CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(id UNINDEXED, title, text, metadataText, terms, tokenize='unicode61');
     `);
   }
-
   replaceAll(documents: DocumentRecord[]): void {
     this.db.exec("BEGIN");
     try {
-      this.db.exec("DELETE FROM documents; DELETE FROM documents_fts;");
-      const insertDocument = this.db.prepare(`
-        INSERT INTO documents (id, path, sourceType, title, hash, modifiedAt, metadata)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-      `);
-      const insertFts = this.db.prepare(`
-        INSERT INTO documents_fts (id, path, sourceType, title, text)
-        VALUES (?, ?, ?, ?, ?)
-      `);
-
+      this.db.exec("DELETE FROM documents; DELETE FROM document_records; DELETE FROM knowledge_chunks; DELETE FROM chunks_fts;");
+      const docInsert = this.db.prepare("INSERT INTO documents VALUES (?, ?, ?, ?, ?, ?, ?)"), recordInsert = this.db.prepare("INSERT INTO document_records VALUES (?, ?)");
+      const chunkInsert = this.db.prepare("INSERT INTO knowledge_chunks VALUES (?, ?, ?, ?)"), ftsInsert = this.db.prepare("INSERT INTO chunks_fts VALUES (?, ?, ?, ?, ?)");
       for (const document of documents) {
-        insertDocument.run(
-          document.id,
-          document.path,
-          document.sourceType,
-          document.title,
-          document.hash,
-          document.modifiedAt,
-          JSON.stringify(document.metadata)
-        );
-        insertFts.run(document.id, document.path, document.sourceType, document.title, document.text);
+        const { chunks: _chunks, ...record } = document;
+        docInsert.run(document.id, document.path, document.sourceType, document.title, document.hash, document.modifiedAt, JSON.stringify(document.metadata));
+        recordInsert.run(document.id, JSON.stringify(record));
+        const chunks = document.chunks ?? chunkDocument(document.id, textBlocks(document.text), chunkPolicy(), document.text);
+        const metadata = searchMetadata(document);
+        for (const chunk of chunks) {
+          chunkInsert.run(chunk.chunkId, document.id, chunk.ordinal, JSON.stringify(chunk));
+          const title = [document.title, ...chunk.headingPath].join(" / ");
+          ftsInsert.run(chunk.chunkId, title, chunk.text, metadata, hanTerms([title, chunk.text, metadata].join("\n").normalize("NFC")));
+        }
       }
-      this.db.exec("COMMIT");
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
+      this.db.exec("PRAGMA user_version = 2; COMMIT");
+    } catch (error) { this.db.exec("ROLLBACK");throw error; }
   }
-
+  document(id: string): DocumentRecord | undefined {
+    if (!this.supportsChunks) throw Object.assign(new Error("This index predates document/chunk citations; explicitly update the base index."), { code: "index_upgrade_required" });
+    const row = this.db.prepare("SELECT record FROM document_records WHERE id = ?").get(id) as { record: string } | undefined;
+    return row ? JSON.parse(row.record) : undefined;
+  }
+  chunk(id: string): KnowledgeChunk | undefined {
+    if (!this.supportsChunks) throw Object.assign(new Error("This index predates chunk citations; explicitly update the base index."), { code: "index_upgrade_required" });
+    const row = this.db.prepare("SELECT record FROM knowledge_chunks WHERE id = ?").get(id) as { record: string } | undefined;
+    return row ? JSON.parse(row.record) : undefined;
+  }
+  chunks(documentId: string, offset = 0, limit = 20): KnowledgeChunk[] {
+    return (this.db.prepare("SELECT record FROM knowledge_chunks WHERE documentId = ? ORDER BY ordinal LIMIT ? OFFSET ?").all(documentId, limit, offset) as Array<{ record: string }>).map(row => JSON.parse(row.record));
+  }
+  chunkCount(documentId: string): number { return Number(this.db.prepare("SELECT count(*) AS count FROM knowledge_chunks WHERE documentId = ?").get(documentId)?.count ?? 0); }
   search(query: string, limit = 10): MemorySearchResult[] {
-    const match = escapeFtsQuery(query);
-    if (!match) return [];
-    const statement = this.db.prepare(`
-      SELECT
-        documents_fts.id AS id,
-        documents_fts.path AS path,
-        documents_fts.sourceType AS sourceType,
-        documents_fts.title AS title,
-        snippet(documents_fts, 4, '[', ']', '...', 24) AS excerpt,
-        bm25(documents_fts) AS score
-      FROM documents_fts
-      WHERE documents_fts MATCH ?
-      ORDER BY score
-      LIMIT ?
-    `);
-
-    return (statement.all(match, limit) as unknown as FtsRow[]).map((row) => ({
-      id: row.id,
-      path: row.path,
-      sourceType: row.sourceType,
-      title: row.title,
-      excerpt: row.excerpt,
-      score: -row.score
-    }));
+    limit = Number.isFinite(limit) ? Math.min(100, Math.max(1, Math.floor(limit))) : 10;
+    if (!this.supportsChunks) return this.legacySearch(query, limit);
+    const match = queryTerms(query);if (!match) return [];
+    const rows = this.db.prepare(`SELECT c.record AS chunk, d.record AS document, bm25(chunks_fts, 0, 3, 1, 2, 1) AS score
+      FROM chunks_fts JOIN knowledge_chunks c ON c.id = chunks_fts.id JOIN document_records d ON d.id = c.documentId
+      WHERE chunks_fts MATCH ? ORDER BY score, c.id LIMIT ?`).all(match, limit) as Array<{ chunk: string; document: string; score: number }>;
+    return rows.map(row => {
+      const chunk = JSON.parse(row.chunk) as KnowledgeChunk, document = JSON.parse(row.document) as DocumentRecord;
+      const needle = (query.match(/[\p{Script=Han}]+|[\p{L}\p{N}_]+/gu) ?? []).find(word => chunk.text.toLowerCase().includes(word.toLowerCase()));
+      const start = needle ? Math.max(0, chunk.text.toLowerCase().indexOf(needle.toLowerCase()) - 120) : 0;
+      return { id: chunk.chunkId, chunkId: chunk.chunkId, documentId: document.id, path: document.path, title: document.title, sourceType: document.sourceType, score: -row.score,
+        excerpt: chunk.text.slice(start, start + 900), sourceHash: document.hash, chunkHash: chunk.chunkHash, parserVersion: chunk.parserVersion, headingPath: chunk.headingPath, location: chunk.location, metadata: document.metadata };
+    });
   }
-
-  close(): void {
-    this.db.close();
+  private legacySearch(query: string, limit: number): MemorySearchResult[] {
+    const match = query.split(/\s+/).filter(Boolean).map(quote).join(" ");if (!match) return [];
+    return (this.db.prepare(`SELECT id, path, sourceType, title, snippet(documents_fts, 4, '[', ']', '...', 24) AS excerpt, -bm25(documents_fts) AS score FROM documents_fts WHERE documents_fts MATCH ? ORDER BY score DESC LIMIT ?`).all(match, limit) as unknown as MemorySearchResult[]);
   }
+  close(): void { this.db.close(); }
 }

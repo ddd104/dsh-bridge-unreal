@@ -1,3 +1,5 @@
+import {EMBEDDING_FIELDS,embeddingEndpoint} from './embedding-spec.mjs';
+
 export const SETTINGS_NAMESPACE = 'dsh-unreal-bridge';
 export const SETTINGS_SLOT_KEY = `${SETTINGS_NAMESPACE}#${SETTINGS_NAMESPACE}`;
 
@@ -12,11 +14,16 @@ export const SETTING_GROUPS = Object.freeze([
   {key:'budget', label:'整轮任务预算', hint:'下一轮用户任务生效；进行中的任务保留启动时的预算。'},
   {key:'timeouts', label:'请求超时', hint:'下一次请求生效。写入超时后先查询原请求结果，不会自动重放。'},
   {key:'cache', label:'缓存保留', hint:'下一次清理生效；保存设置本身不会删除文件。'},
+  {key:'retrieval',label:'知识上下文预算',hint:'限制 project_context 的总输出；没有模型专用分词器时，按 UTF-8 字节保守估算 Token。'},
+  {key:'embedding',label:'知识库与 Embedding',hint:'公开配置由 DSH 保存，API Key 通过下方独立凭据入口保存。配置保存不扫描文档、不生成向量。'},
 ]);
 
 export const FIELD_SPECS = Object.freeze([
+  ...EMBEDDING_FIELDS,
+  number('knowledgeContextMaxTokens','上下文 Token 预算',12000,2048,64000,'retrieval','先裁剪导航摘要，再裁剪低排名证据；引用仍可单独回读。'),
+  number('knowledgeContextMaxChars','上下文字符上限',24000,2048,128000,'retrieval','与 Token 预算同时生效，包含返回的引用和状态字段。'),
   boolean('allowWrites', '允许修改 UE 资产和项目知识', true, '关闭后仍可读取；未知 MCP 操作按可能写入处理。'),
-  boolean('requireApproval', '原生写入前请求批准', true, '适用于蓝图应用、撤销、保存和知识记录等原生写入；UE MCP 按既有策略执行。开启后需使用支持批准的 DSH 会话。'),
+  boolean('requireApproval', '原生写入前请求批准', false, '适用于蓝图应用、撤销、保存和知识记录等原生写入；UE MCP 按既有策略执行。开启后需使用支持批准的 DSH 会话。'),
   number('guardMaxRepairAttempts', '每个问题最多修复次数', 3, 0, 50, 'repair', '0 表示发生问题后不尝试修复；失败请求不会被自动原样重放。'),
   number('guardMaxRepeatedErrors', '相同错误最多连续出现次数', 2, 1, 50, 'repair', '达到上限后停止继续尝试同一问题，并说明现状。'),
   number('guardMaxMalformedRetries', '模型参数纠错次数', 2, 0, 10, 'repair', '每轮任务中，尚未执行的 UE 工具参数 JSON 无效时最多重新生成的次数；0 表示关闭，不重放已执行操作。'),
@@ -44,6 +51,13 @@ export function parseFieldInput(field, input) {
 
 export function fieldValueError(field, value) {
   if (field.type === 'boolean') return typeof value === 'boolean' ? null : '请选择开或关。';
+  if (field.type === 'choice') return field.options.some(option=>option.value===value)?null:'请选择支持的协议。';
+  if (field.type === 'text') {
+    if(typeof value!=='string'||value.length>field.maxLength||/[\r\n\0]/.test(value))return `请输入不超过 ${field.maxLength} 字符的单行文本。`;
+    if(field.pattern&&!new RegExp(field.pattern).test(value))return '使用小写字母开头，只包含小写字母、数字和连字符。';
+    if(field.key==='embeddingBaseUrl'&&value.trim())try{embeddingEndpoint(value.trim());}catch(error){return error.message;}
+    return null;
+  }
   if (!Number.isSafeInteger(value) || value < field.min || value > field.max)
     return field.scale === 60000
       ? `请输入 ${field.min / 1000} 秒–${field.max / field.scale} 分钟范围内的有效数值（以分钟输入，可填小数）。`

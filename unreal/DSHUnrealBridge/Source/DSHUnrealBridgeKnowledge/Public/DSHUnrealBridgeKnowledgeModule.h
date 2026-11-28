@@ -20,6 +20,7 @@ public:
     // 全量缓存复用现有 IR 读取器，不把模型分页上限带入磁盘快照。
     static TSharedPtr<FJsonObject> DescribeBlueprintSnapshot(UBlueprint* Blueprint);
     static TSharedPtr<FJsonObject> DescribeMaterialSnapshot(UMaterial* Material);
+    static TSharedPtr<FJsonObject> ExecuteSnapshotExport(const FString& Tool, const TSharedPtr<FJsonObject>& Arguments);
 
 private:
     // 自动化通过实际菜单委托覆盖更新/取消链路，不公开额外运行时控制入口。
@@ -27,10 +28,11 @@ private:
     friend class FWaitProjectKnowledgeMenu;
     TArray<IConsoleObject*> ConsoleCommands;
     TSharedPtr<FProjectKnowledgeUpdate, ESPMode::ThreadSafe> KnowledgeUpdate;
+    TMap<FString, TSharedPtr<FProjectKnowledgeUpdate, ESPMode::ThreadSafe>> SnapshotJobs;
     FTSTicker::FDelegateHandle KnowledgeTicker;
 
     void RegisterMenus();
-    void StartKnowledgeUpdate();
+    void StartKnowledgeUpdate(bool bSnapshotOnly = false, const FString& RequestId = FString(), const FString& EditorId = FString());
     void CancelKnowledgeUpdate();
     bool TickKnowledgeUpdate(float DeltaTime);
 

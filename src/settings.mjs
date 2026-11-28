@@ -5,7 +5,7 @@ export {FIELD_SPECS, DEFAULTS} from './settings-spec.mjs';
 
 const fields = Object.fromEntries(FIELD_SPECS.map(field => [
   field.key,
-  (field.type === 'boolean' ? Schema.boolean() : Schema.number().step(1).min(field.min).max(field.max))
+  (field.type === 'boolean' ? Schema.boolean() : field.type === 'choice' ? Schema.union(field.options.map(option=>Schema.const(option.value))) : field.type === 'text' ? Schema.string().max(field.maxLength).pattern(new RegExp(field.pattern??'^[^\\r\\n\\0]*$')) : Schema.number().step(1).min(field.min).max(field.max))
     .default(field.defaultValue).description(field.hint).volatile(),
 ]));
 

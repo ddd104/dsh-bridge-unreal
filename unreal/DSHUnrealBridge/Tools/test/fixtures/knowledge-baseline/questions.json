@@ -1,0 +1,110 @@
+{
+  "version": 2,
+  "baseline": "M2 (M0 corpus retained)",
+  "questions": [
+    {
+      "id": "chinese-full-sentence",
+      "category": "chinese",
+      "question": "文档是否能检索完整的中文句子？",
+      "route": "fulltext",
+      "query": "车辆休眠唤醒流程需要重新绑定显示窗口",
+      "relevantPaths": ["ProjectKnowledge/systems/power.md"]
+    },
+    {
+      "id": "chinese-substring-fts-gap",
+      "category": "chinese",
+      "question": "哪些文档描述了唤醒？",
+      "route": "fulltext",
+      "query": "唤醒",
+      "relevantPaths": ["ProjectKnowledge/systems/power.md"]
+    },
+    {
+      "id": "chinese-substring-source",
+      "category": "chinese",
+      "question": "源码搜索能否补充唤醒相关的文档和代码？",
+      "route": "project_search",
+      "query": "唤醒",
+      "relevantPaths": ["ProjectKnowledge/systems/power.md", "Source/Baseline/DisplayLifecycle.h"]
+    },
+    {
+      "id": "exact-symbol-source",
+      "category": "symbol",
+      "question": "UDisplayLifecycle 定义和说明在哪里？",
+      "route": "project_search",
+      "query": "UDisplayLifecycle",
+      "relevantPaths": ["Source/Baseline/DisplayLifecycle.h", "ProjectKnowledge/systems/power.md"]
+    },
+    {
+      "id": "exact-symbol-graph",
+      "category": "symbol",
+      "question": "图谱是否能定位 UDisplayLifecycle？",
+      "route": "graph_query",
+      "query": "UDisplayLifecycle",
+      "relevantPaths": ["Source/Baseline/DisplayLifecycle.h"]
+    },
+    {
+      "id": "markdown-document",
+      "category": "document",
+      "question": "RenderBudgetMarker 的限制记录在哪里？",
+      "route": "fulltext",
+      "query": "RenderBudgetMarker",
+      "relevantPaths": ["ProjectKnowledge/Docs/rendering.md"]
+    },
+    {
+      "id": "csv-document",
+      "category": "document",
+      "question": "VehicleSpeedMarker 的周期记录在哪张表？",
+      "route": "fulltext",
+      "query": "VehicleSpeedMarker",
+      "relevantPaths": ["ProjectKnowledge/Docs/signals.csv"]
+    },
+    {
+      "id": "json-document",
+      "category": "document",
+      "question": "ParkingConfigMarker 的配置记录在哪里？",
+      "route": "fulltext",
+      "query": "ParkingConfigMarker",
+      "relevantPaths": ["ProjectKnowledge/Docs/settings.json"]
+    },
+    {
+      "id": "exact-asset-graph",
+      "category": "asset",
+      "question": "图谱是否包含指定的 Widget 资产？",
+      "route": "graph_query",
+      "query": "/Game/UI/WBP_PowerStatus.WBP_PowerStatus",
+      "relevantPaths": ["/Game/UI/WBP_PowerStatus"]
+    },
+    {
+      "id": "exact-asset-document",
+      "category": "asset",
+      "question": "哪个文档引用了这个 Widget？",
+      "route": "fulltext",
+      "query": "/Game/UI/WBP_PowerStatus.WBP_PowerStatus",
+      "relevantPaths": ["ProjectKnowledge/systems/power.md"]
+    },
+    {
+      "id": "mixed-context",
+      "category": "mixed",
+      "question": "STR 唤醒后 UDisplayLifecycle 的实现和约束在哪里？",
+      "route": "project_context",
+      "query": "STR 唤醒 UDisplayLifecycle",
+      "relevantPaths": ["Source/Baseline/DisplayLifecycle.h", "ProjectKnowledge/systems/power.md"]
+    },
+    {
+      "id": "absent-fulltext",
+      "category": "no-answer",
+      "question": "资料中有没有 QuantumFluxAbsentMarker 的证据？",
+      "route": "fulltext",
+      "query": "QuantumFluxAbsentMarker",
+      "relevantPaths": []
+    },
+    {
+      "id": "absent-context",
+      "category": "no-answer",
+      "question": "缺少证据时上下文是否明确保留未知状态？",
+      "route": "project_context",
+      "query": "QuantumFluxAbsentMarker",
+      "relevantPaths": []
+    }
+  ]
+}

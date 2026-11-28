@@ -8,6 +8,8 @@ export interface LoadProjectConfigOptions {
   projectRoot?: string;
   configPath?: string;
   startDir?: string;
+  // Trusted host-owned paths, never read from project JSON or tool arguments.
+  hostPaths?: { memoryRoot: string; graphRoot: string; ueCacheRoot: string; projectId: string };
 }
 
 function findUProjectRoot(startDir: string): string | undefined {
@@ -66,6 +68,25 @@ export async function loadProjectConfig(options: LoadProjectConfigOptions = {}):
     const uproject = readdirSync(projectRoot).find((entry) => entry.endsWith(".uproject"));
     config.projectId = uproject ? path.basename(uproject, ".uproject") : path.basename(projectRoot);
     if (config.project) { config.project.name = config.projectId; config.project.uproject = uproject ?? ""; }
+  }
+  if (options.hostPaths) {
+    const host = options.hostPaths;
+    config.projectId = host.projectId;
+    config.memoryOutputRoot = path.resolve(host.memoryRoot);
+    config.graph = {
+      ...config.graph, mode: "sqlite",
+      sqlitePath: path.join(host.graphRoot, "project_graph.sqlite"),
+      sqlite: {
+        databasePath: path.join(host.graphRoot, "project_graph.sqlite"),
+        nodesPath: path.join(host.graphRoot, "nodes.jsonl"),
+        edgesPath: path.join(host.graphRoot, "edges.jsonl")
+      }
+    };
+    Object.assign(config.graph, { ueCacheRoots: {
+      blueprints: path.join(host.ueCacheRoot, "blueprint_ir"),
+      assets: path.join(host.ueCacheRoot, "asset_registry"),
+      materials: path.join(host.ueCacheRoot, "material_ir")
+    } });
   }
   return {
     config,

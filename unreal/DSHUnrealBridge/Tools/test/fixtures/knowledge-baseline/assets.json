@@ -1,0 +1,12 @@
+{
+  "ok": true,
+  "assets": [
+    {
+      "assetPath": "/Game/UI/WBP_PowerStatus.WBP_PowerStatus",
+      "assetClass": "/Script/Engine.WidgetBlueprint",
+      "packageName": "/Game/UI/WBP_PowerStatus",
+      "dependencies": ["/Script/UMG"],
+      "referencers": []
+    }
+  ]
+}

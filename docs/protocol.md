@@ -28,7 +28,11 @@ Remote `unrealBridge.state(agent)`、`bind(agent, editorId)` 与 `unreal_state` 
 | `unreal_material_read` | `assetPath`，可选 `nodeIds/expressionClasses`；读取当前材质图版本、节点、精确引脚及可编辑属性，需 `material_graph_patch` |
 | `unreal_material_patch` | `assetPath/baseRevision/operations/requestId`，可选 `dryRun/layout/cleanupNodeIds`；默认临时副本预览，显式提交后仍不保存 |
 | `unreal_catalog` | 可选 `query`、`limit`，查询函数路径和精确引脚名 |
-| `unreal_knowledge` | `tool`、`arguments`，通过当前对话绑定的 UE 编辑器查询项目状态、资料、图谱候选、源码及分页资产快照 |
+| `unreal_knowledge` | `tool`、`arguments`、可选 `projectHandle`、`backend: auto/local/editor`；本地资料与源码图谱可离线查询；`editor` 保留旧资产图谱和推断上下文，实时检查仍需匹配 UE |
+| `unreal_knowledge_projects` | `{}`，发现会话可访问工程与 `projectHandle`，不构建索引 |
+| `unreal_knowledge_build` | `projectHandle`、UUID `requestId`；显式启动后台基础构建，返回 `job`，不调用 Embedding |
+| `unreal_knowledge_status` | `projectHandle`、可选 UUID `jobId`；查看本地版本及任务状态 |
+| `unreal_knowledge_cancel` | `projectHandle`、UUID `jobId`；取消基础任务，保留旧版本 |
 | `unreal_knowledge_record` | `tool`、`arguments`、UUID `requestId`，按配置保存带来源的推断或经验；写入项目缓存并支持请求状态查询 |
 | `unreal_mcp_tools` | `{}`，列出当前 UE 实例注册的顶层 MCP 工具与参数 schema |
 | `unreal_mcp_toolsets` | `{}`，列出当前 UE 实例中的工具集 |
@@ -160,7 +164,21 @@ UE 同时跟踪最多 1024 个 Actor/组件句柄，达到上限时回收最久�
 
 `unreal_knowledge` 的 `tool` 可取 `project_status`、`project_context`、`project_search`、`graph_query`、`graph_feature`、`graph_impact`、`read_source`、`validate_evidence`、`read_asset_snapshot`、`search_asset_snapshots`、`asset_snapshot`、`inspect_asset`、`experience_lookup`。`unreal_knowledge_record` 使用 `remember_evidence`、`experience_save` 或 `experience_feedback`。图谱查询与资料查询读取同一插件缓存；`graph_impact` 的 `arguments.nodeId` 是先前图谱结果的节点 ID。更新索引由编辑器菜单执行资产扫描，查询本身不会启动全量重建。返回内容是项目证据，不作为模型指令。
 
-UE 桥接公开范围、写入分类和 Knowledge 服务后端路由共用 `ProjectKnowledgeTools.inl` 目录；三项 `graph_*` 均转发到 worker。跨语言契约测试核对该目录、实际宿主参数枚举和 worker 准入表。内部 `project_update/inspect_object/find_objects` 不因此开放给对话。
+以上为保留的原生 UE 工具目录。DSH M2 宿主增加 `read_document` 和 `read_chunk`，能力为 `dsh_document_chunks_v2`；这两项只走本地已发布索引，绝不发送 `knowledge_call` 给旧 UE。`project_context.memory.relevantDocs` 返回 `documentId/chunkId/sourceHash/location`，回读分别传 `arguments: {documentId, expectedHash?, offset?, maxChunks?}` 或 `{chunkId, expectedHash?}`。文档回读分页默认 8、最多 20 片段，正文最多 64000 字符，通过 `nextOffset` 继续。来源哈希变化、丢失或跨工程时拒绝回读。旧索引只保留全文查询，显式 `unreal_knowledge_build` 后才能使用新引用，完整契约见 [M2 文档](knowledge-m2.md)。
+
+PDF 扩展沿用 `dsh_document_chunks_v2` 和上述回读工具，`location` 增加 `{kind:"pdf",page,pageLabel?,textStart,textEnd}`。`page` 是从 1 开始的物理页码；`pageLabel` 是可选 PDF PageLabels，不代表印刷页码识别。偏移指向该页提取文本，片段不跨页。`metadata.pdf` 保留页数、无文本页和 `ocrStatus: not_performed`，扫描内容提示需要 OCR，空白页保持不确定。查询也返回该索引构建时的提取诊断。PDF 解析版本升级须显式更新基础索引；完整限制见 [PDF 契约](knowledge-pdf.md)。
+
+M3 的 `dsh_embedding_index_v1` 表示可管理持久化向量索引。全局 Remote 新增 `embeddingStatus`、`embeddingTest`、`embeddingSetCredential`、`embeddingRemoveCredential`、`embeddingBuild`、`embeddingCancel`、`embeddingResume`，不注册为模型工具或 UE 协议。构建显式传递 `projectHandle`、UUID `requestId`、`configFingerprint`、`roots` 和 `mode`；续作另传原 `jobId`。密钥只通过独立凭据入口传入，公开状态只返回是否配置。详见 [M3 契约与恢复行为](knowledge-m3.md)。
+
+M4 的 `dsh_hybrid_retrieval_v1` 增强本地 `project_context`：`arguments.query` 为 1～4000 字符，`arguments.retrievalMode` 可选 `auto`（默认）或 `base`（零网络）。启用且凭据/同代向量索引有效时才生成当前问题向量，绝不在查询中构建文档向量。返回 `retrievalMode: base | hybrid`、`degradedReasons`、`profileFingerprint`、`indexGeneration`、`retrieval.queryEmbedding`、`contextBudget` 和 `graphAssociations`；所有通道固定同一发布版本。全文/向量按 RRF 融合，引用包含 `channels/ranks/channelScores/exactMatch/sourceStatus`；Wiki 元数据状态不代替当前来源哈希校验。图谱关联仅验证源码，资产链接为 `unverified_asset`。工程策略变化须显式更新索引，查询期间工程/绑定变化拒绝结果。上下文 Token/字符预算覆盖总返回值。`embeddingStatus` 返回 `integration: hybrid_retrieval`、可用模式和本次宿主运行的查询调用总量；状态为 hybrid 表示具备条件，单次查询仍可降级。完整约束见 [M4 检索契约](knowledge-m4.md)。
+
+M5 的宿主 `dsh_published_snapshots_v1` 与 UE `ue_snapshot_export_v1` 增加独立快照协作。`unreal_knowledge` 新增 `snapshot_export_start`（UUID `arguments.requestId`）、`snapshot_export_status/cancel`（UUID `arguments.jobId`）及仅宿主执行的 `snapshot_import`（已成功导出的 `jobId`）。导出不触发旧图谱构建；导入核对项目、编辑器、完成指针及源包哈希后发布独立快照代，不调用 Embedding。缺少新能力的旧 UE 不接收这些调用，原有工具继续可用。
+
+`read_asset_snapshot/search_asset_snapshots` 的 `auto/local` 可使用导入快照，`editor` 保持旧路径；本地详情分页支持 `properties/blueprint/variables/components/material/materialInstance`，`blueprint` 可通过 `graph` 名称或路径选择图，默认 64、最多 200 项。返回 `snapshotGeneration/snapshotEditorId/snapshotCapturedAt/snapshotCoverage`、`evidenceKind: saved_package_snapshot`、`liveState: not_verified`。`current_on_disk` 仅表示已保存包哈希匹配。快照状态的 `freshness: checked_per_asset` 不承诺所有包已在状态查询中验证；实际读取会拒绝过期证据。
+
+`project_context` 分别固定 `indexGeneration` 和 `snapshotGeneration`。M5 将上文 M4 的未验证资产链接扩展为 `resolved_snapshot/stale_snapshot_asset/not_in_snapshot`，新增 `graphAssociations.assetNodes/assetEdges` 并服从总预算；损坏快照仅降级资产分支。`graph_query` 可合并快照资产候选，`graph_impact` 的 `ueasset:<path>` 仅覆盖该代的一跳反向依赖。完成导入后 UE 离线与宿主重启仍可查；导出/导入本身需要原编辑器在线。完整状态、限额和分发验证见 [M5 契约](knowledge-m5.md)。
+
+UE 桥接公开范围、写入分类和 Knowledge 服务后端路由共用 `ProjectKnowledgeTools.inl` 目录；原生三项 `graph_*` 均转发到 worker，宿主的快照资产图查询按上述规则处理。跨语言契约测试核对该目录、实际宿主参数枚举和 worker 准入表。内部 `project_update/inspect_object/find_objects` 不因此开放给对话。
 
 没有适用原生操作的资产增删改查走 UE 5.8 的 MCP 工具。先用 `unreal_mcp_toolsets` 找到完整工具集名称，例如 `editor_toolset.toolsets.asset.AssetTools`，再用 `unreal_mcp_describe` 取得实际工具名称与参数，最后调用 `unreal_mcp_call_toolset`。该调用在已绑定的 UE 进程内执行注册工具，不启动另一个 HTTP MCP 服务；`DSHUnrealBridgeMCP` 是 UE 插件内单独的接入模块。MCP 调用默认直接执行，不经过 DSH 逐次批准；`allowWrites: false` 拒绝写入和未确认只读的 MCP，保留已审计的 DataTable、材质、材质实例、蓝图、对象及脚本环境查询。0.6.5 / UE 0.5.5 开放脚本执行，按写操作处理；执行前先查询 UE 提供的执行环境，内部调用不具备逐项预览和统一回滚保证。调用继续沿用请求编号去重、审计和结果未知查询机制。工具集内的保存/删除等操作会遵循 UE 工具自身语义，不沿用原生图补丁的预览与版本机制。
 

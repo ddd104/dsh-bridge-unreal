@@ -15,8 +15,8 @@ function pathPriority(pathValue: string): number {
 
 export function rerankSearchResults(results: MemorySearchResult[]): MemorySearchResult[] {
   return [...results].sort((a, b) => {
-    const aScore = a.score + pathPriority(a.path);
-    const bScore = b.score + pathPriority(b.path);
+    const aScore = a.score;
+    const bScore = b.score;
     return bScore - aScore || a.path.localeCompare(b.path);
   });
 }

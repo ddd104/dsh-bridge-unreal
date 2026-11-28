@@ -38,6 +38,12 @@ test('official Config exposes only editable fields as volatile and validates def
       assert.throws(() => Config({[field.key]:field.min + 0.5}));
       assert.equal(Config({[field.key]:field.min})[field.key].get(), field.min);
     }
+    if(field.type==='text'){
+      assert.throws(()=>Config({[field.key]:'x'.repeat(field.maxLength+1)}));
+      assert.throws(()=>Config({[field.key]:'line\nbreak'}));
+      if(field.pattern)assert.throws(()=>Config({[field.key]:'not valid'}));
+    }
+    if(field.type==='choice')assert.throws(()=>Config({[field.key]:'unsupported'}));
   }
   for (const key of ['port','stateDir','allowMcpDesktopInput']) assert.notEqual(Config.dict[key].meta.volatile, true);
   assert.equal(parsed.port, 17891);

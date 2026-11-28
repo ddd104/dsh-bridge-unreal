@@ -11,9 +11,13 @@ import { textSource } from "../sources/textSource.js";
 import { yamlSource } from "../sources/yamlSource.js";
 import type { DocumentRecord, LoadedProjectConfig, ProjectMemoryConfig } from "../types/memoryTypes.js";
 import { FullTextIndex } from "./fullTextIndex.js";
+import { chunkDocument, chunkPolicy, documentIdentity, PARSER_VERSION, policyFingerprint } from "./documentChunks.js";
+import { textBlocks } from "../sources/textStructure.js";
+import { resolveWikiReferences } from "./wikiReferences.js";
 
 export interface DocumentIndexResult {
   documentsIndexed: number;
+  chunksIndexed: number;
   documentsPath: string;
   ftsPath: string;
   warnings: string[];
@@ -85,7 +89,7 @@ function configuredExcludePatterns(config: ProjectMemoryConfig): string[] {
 function configuredExtensions(config: ProjectMemoryConfig, registry: SourceRegistry): Set<string> {
   const requested = config.sourcePolicy?.includeExtensions?.map((extension) => extension.toLowerCase()) ?? [];
   const registered = new Set(registry.list().flatMap((provider) => provider.extensions));
-  const defaults = [".md", ".txt", ".proto", ".json", ".jsonl", ".csv", ".tsv", ".yaml", ".yml", ".ini", ".xls", ".xlsx", ".docx"];
+  const defaults = [".md", ".markdown", ".txt", ".proto", ".json", ".jsonl", ".csv", ".tsv", ".yaml", ".yml", ".ini", ".xls", ".xlsx", ".docx", ".pdf"];
   return new Set((requested.length > 0 ? requested : defaults).filter((extension) => registered.has(extension)));
 }
 
@@ -141,12 +145,14 @@ async function sourceEntry(projectRoot: string, filePath: string, registry: Sour
   const provider = registry.findByExtension(extension);
   if (!provider) return undefined;
 
-  const [content, stats] = await Promise.all([readFile(filePath), stat(filePath)]);
+  const stats = await stat(filePath);
+  if (stats.size > 64 * 1024 * 1024) throw new Error("Document exceeds the 64 MiB source limit.");
+  const content = await readFile(filePath);
   const projectPath = toProjectPath(projectRoot, filePath);
   const hash = createHash("sha256").update(content).digest("hex");
 
   return {
-    id: hash.slice(0, 16),
+    id: documentIdentity(projectRoot, projectPath),
     path: projectPath,
     sourceType: provider.id,
     hash,
@@ -157,16 +163,22 @@ async function sourceEntry(projectRoot: string, filePath: string, registry: Sour
   };
 }
 
-async function readDocument(projectRoot: string, source: DocumentSourceEntry, registry: SourceRegistry): Promise<DocumentRecord | undefined> {
+async function readDocument(loaded: LoadedProjectConfig, source: DocumentSourceEntry, registry: SourceRegistry): Promise<DocumentRecord | undefined> {
   const provider = registry.findByExtension(source.extension);
   if (!provider) return undefined;
 
   const content = await readFile(source.absolutePath);
+  if (createHash("sha256").update(content).digest("hex") !== source.hash) throw Object.assign(new Error("Source changed during parsing."), { code: "source_changed" });
   const parsed = await provider.parse(source.absolutePath, content);
   const text = parsed.text.trim();
+  const id = documentIdentity(loaded.projectRoot, source.path, parsed.sourceType === "markdown" && typeof parsed.metadata?.id === "string" ? parsed.metadata.id : undefined);
+  const policy = chunkPolicy(loaded.config);
+  const raw = ["docx", "xlsx", "xls", "pdf"].includes(parsed.sourceType) ? undefined : content.toString("utf8");
+  const blocks = parsed.blocks ?? textBlocks(raw ?? parsed.text);
 
   return {
-    id: source.id,
+    id, schemaVersion: 2, parserVersion: PARSER_VERSION, sourceHash: source.hash,
+    chunkingFingerprint: policyFingerprint(policy), chunks: chunkDocument(id, blocks, policy, raw),
     path: source.path,
     sourceType: parsed.sourceType,
     title: parsed.title?.trim() || fallbackTitle(source.absolutePath, text),
@@ -214,8 +226,9 @@ export async function discoverDocumentSources(loaded: LoadedProjectConfig): Prom
     }
   }
 
-  sources.sort((a, b) => a.path.localeCompare(b.path));
-  return { sources, warnings };
+  const unique = [...new Map(sources.map(source => [process.platform === "win32" ? source.path.toLowerCase() : source.path, source])).values()];
+  unique.sort((a, b) => a.path.localeCompare(b.path));
+  return { sources: unique, warnings };
 }
 
 async function readDocumentsJsonl(documentsPath: string): Promise<Map<string, DocumentRecord>> {
@@ -236,6 +249,7 @@ async function readDocumentsJsonl(documentsPath: string): Promise<Map<string, Do
 }
 
 export async function collectDocuments(loaded: LoadedProjectConfig): Promise<{ documents: DocumentRecord[]; sources: MemoryManifestSource[]; warnings: string[] }> {
+  chunkPolicy(loaded.config);
   const registry = createRegistry();
   const discovered = await discoverDocumentSources(loaded);
   const documents: DocumentRecord[] = [];
@@ -243,14 +257,16 @@ export async function collectDocuments(loaded: LoadedProjectConfig): Promise<{ d
 
   for (const source of discovered.sources) {
     try {
-      const document = await readDocument(loaded.projectRoot, source, registry);
+      const document = await readDocument(loaded, source, registry);
       if (document) documents.push(document);
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
+      if (error && typeof error === "object" && "code" in error && error.code === "source_changed") throw error;
       warnings.push(`Skipped ${source.path}: ${reason}`);
     }
   }
 
+  warnings.push(...pdfWarnings(documents), ...await resolveWikiReferences(loaded.projectRoot, documents));
   documents.sort((a, b) => a.path.localeCompare(b.path));
   return {
     documents,
@@ -265,10 +281,13 @@ export async function writeDocumentsJsonl(outputRoot: string, documents: Documen
   const documentsPath = path.join(indexDir, "documents.jsonl");
   const lines = documents.map((document) => JSON.stringify(document));
   await writeFile(documentsPath, `${lines.join("\n")}${lines.length > 0 ? "\n" : ""}`, "utf8");
+  const chunks = documents.flatMap(document => document.chunks ?? []);
+  await writeFile(path.join(indexDir, "chunks.jsonl"), chunks.map(chunk => JSON.stringify(chunk)).join("\n") + (chunks.length ? "\n" : ""), "utf8");
   return documentsPath;
 }
 
 export async function indexDocuments(loaded: LoadedProjectConfig, options: IndexOptions = {}): Promise<DocumentIndexResult> {
+  chunkPolicy(loaded.config);
   const outputRoot = loaded.resolvedMemoryOutputRoot;
   const indexDir = path.join(outputRoot, "index");
   const documentsPath = path.join(indexDir, "documents.jsonl");
@@ -286,36 +305,39 @@ export async function indexDocuments(loaded: LoadedProjectConfig, options: Index
   for (const source of discovered.sources) {
     const previous = previousSourceMap.get(source.path);
     const existingDocument = existingDocuments.get(source.path);
-    if (options.incremental && previous && existingDocument && signaturesEqual(previous, source)) {
+    if (options.incremental && previous && existingDocument?.schemaVersion === 2 && existingDocument.parserVersion === PARSER_VERSION && existingDocument.chunkingFingerprint === policyFingerprint(chunkPolicy(loaded.config)) && signaturesEqual(previous, source)) {
       documents.push(existingDocument);
       unchangedSources.push(source.path);
       continue;
     }
 
     try {
-      const document = await readDocument(loaded.projectRoot, source, registry);
+      const document = await readDocument(loaded, source, registry);
       if (document) documents.push(document);
       changedSources.push(source.path);
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
+      if (error && typeof error === "object" && "code" in error && error.code === "source_changed") throw error;
       warnings.push(`Skipped ${source.path}: ${reason}`);
     }
   }
 
   const removedSources = [...previousSourceMap.keys()].filter((sourcePath) => !currentSourcePaths.has(sourcePath)).sort();
+  warnings.push(...pdfWarnings(documents), ...await resolveWikiReferences(loaded.projectRoot, documents));
   documents.sort((a, b) => a.path.localeCompare(b.path));
 
   if (options.writeCache !== false) {
     await mkdir(indexDir, { recursive: true });
     await writeDocumentsJsonl(outputRoot, documents);
+    await writeFile(path.join(indexDir, "document-warnings.json"), JSON.stringify(warnings.slice(0, 100).map(warning => warning.slice(0, 2000))), "utf8");
     await rm(ftsPath, { force: true });
     const fullTextIndex = FullTextIndex.create(ftsPath);
-    fullTextIndex.replaceAll(documents);
-    fullTextIndex.close();
+    try { fullTextIndex.replaceAll(documents); } finally { fullTextIndex.close(); }
   }
 
   return {
     documentsIndexed: documents.length,
+    chunksIndexed: documents.reduce((count, document) => count + (document.chunks?.length ?? 0), 0),
     documentsPath,
     ftsPath,
     warnings,
@@ -324,4 +346,11 @@ export async function indexDocuments(loaded: LoadedProjectConfig, options: Index
     unchangedSources,
     removedSources
   };
+}
+
+function pdfWarnings(documents: DocumentRecord[]): string[] {
+  return documents.flatMap(document => {
+    const pdf = document.metadata.pdf as { warning?: string; noTextPages?: number[] } | undefined;
+    return pdf?.warning ? [`${document.path}: ${pdf.warning} Physical pages: ${(pdf.noTextPages ?? []).join(", ")}.`] : [];
+  });
 }

@@ -21,6 +21,11 @@ export {Config} from './settings.mjs';
 import {levelBlueprintSchema} from './protocol.mjs';
 import {materialReadSchema,materialPatchSchema} from './protocol.mjs';
 import {requiresMcpOperationContext} from './mcp-contract.mjs';
+import {KnowledgeService} from './knowledge-service.mjs';
+import {hostKnowledgeSchema,knowledgeBuildSchema,knowledgeStatusSchema,knowledgeCancelSchema} from './knowledge-protocol.mjs';
+import {EmbeddingService} from './embedding-service.mjs';
+import {embeddingStatusSchema,embeddingTestSchema,embeddingCredentialSchema,embeddingRemoveCredentialSchema,embeddingBuildSchema,embeddingCancelSchema,embeddingResumeSchema} from './embedding-protocol.mjs';
+import {boundKnowledgeActionSchema} from './bound-knowledge.mjs';
 
 export const name='unreal-bridge';
 export const inject=['tools','systemPrompt','typert'];
@@ -30,9 +35,15 @@ const sessionOf=agent=>{if(!agent?.session?.id)fail('SESSION_REQUIRED','An ownin
 export async function apply(ctx,raw={}) {
   const configState=createConfigState(raw),config=configState.current,getConfig=()=>configState.snapshot();
   registerSettings(ctx);
-  const getService=optionalServices(ctx,['sessionProjections','approval','fs','workingDirectory','attachments','llm']);
+  const getService=optionalServices(ctx,['sessionProjections','approval','fs','workingDirectory','attachments','llm','credentials']);
   const outputContext={get:getService};
   const bridge=new UnrealBridge(getConfig(),{getConfig});
+  const knowledge=new KnowledgeService({getService,bridge,stateDir:bridge.config.stateDir});
+  ctx.effect(()=>()=>knowledge.dispose(),'Unreal knowledge lifetime');
+  const embedding=new EmbeddingService({knowledge,getConfig,getService,stateDir:bridge.config.stateDir,onChange:()=>bridge.changed()});
+  ctx.effect(()=>()=>embedding.dispose(),'Unreal embedding lifetime');
+  ctx.on?.('loader/volatile-update',()=>embedding.configurationChanged());
+  ctx.on?.('credentials/record-updated',key=>embedding.credentialChanged(key));
   const guard=registerExecutionGuard(ctx,getConfig,{onChange:()=>bridge.changed(),getService});
   const disposeModelRecovery=registerModelRecovery(ctx,guard);
   ctx.effect(()=>disposeModelRecovery,'Unreal model parameter recovery');
@@ -59,6 +70,21 @@ export async function apply(ctx,raw={}) {
   try{await bridge.start();}catch(error){await bridge.close();throw error;} ctx.effect(()=>()=>bridge.close(),'Unreal bridge lifetime');
   cache.start();
   const remote={ctx,bridge,state:agent=>state(sessionOf(agent)),bind:(agent,editorId)=>{const session=sessionOf(agent);bridge.bind(session,editorId);return state(session);},editAssetCandidates:async(agent,options)=>{const session=sessionOf(agent);await bridge.editAssetCandidates(session,options);return state(session);},cacheStatus:()=>cache.status(),cacheCleanup:options=>cache.cleanup(options)};
+  Object.assign(remote,{
+    knowledgeContext:agent=>knowledge.boundContext(agent),
+    knowledgeAction:(agent,options)=>knowledge.boundAction(agent,boundKnowledgeActionSchema.parse(options)),
+    knowledgeProjects:()=>knowledge.projects(),knowledgeWorkspaceProjects:agent=>bridge.sessions.has(agent.session.id)?knowledge.projects(agent):{projects:[],requiresSelection:false},
+    knowledgeStatus:options=>knowledge.status(knowledgeStatusSchema.parse(options)),
+    knowledgeBuild:options=>knowledge.build(knowledgeBuildSchema.parse(options)),
+    knowledgeCancel:options=>knowledge.cancel(knowledgeCancelSchema.parse(options)),
+    embeddingStatus:options=>embedding.status(embeddingStatusSchema.parse(options??{})),
+    embeddingTest:options=>embedding.test(embeddingTestSchema.parse(options)),
+    embeddingSetCredential:options=>embedding.setCredential(embeddingCredentialSchema.parse(options)),
+    embeddingRemoveCredential:options=>embedding.removeCredential(embeddingRemoveCredentialSchema.parse(options)),
+    embeddingBuild:options=>embedding.build(embeddingBuildSchema.parse(options)),
+    embeddingCancel:options=>embedding.cancel(embeddingCancelSchema.parse(options)),
+    embeddingResume:options=>embedding.resume(embeddingResumeSchema.parse(options)),
+  });
   remote.typertRemote=Object.freeze({service:remote,serviceKey:'unrealBridge',namespace:'unrealBridge'});
   ctx.provide('unrealBridge',remote);
   ctx.inject?.(['skills','fs'],skillCtx=>{
@@ -153,8 +179,12 @@ export async function apply(ctx,raw={}) {
     return visual.withEvidence(result,()=>prepareVisualOutput(outputContext,e,result,[{path:result.evidence.comparison,label:'参考图（左）与当前 UE 截图（右）'},...(result.evidence.heatmapPreview?[{path:result.evidence.heatmapPreview,label:'色差热图：黑色表示无差异，红黄表示差异增大'}]:[])]));
   });
   tool('unreal_catalog','Search loaded native Blueprint functions and read their exact pin definitions. Omit query for common functions. For Make Struct, Make Array, variables and generic array operations, discover BlueprintTools.find_node_types through unreal_mcp_describe.',catalogSchema,async(a,_e,s)=>bridge.catalog(s,a));
-  tool('unreal_knowledge','Query project status, graph and document context, cited source, or paged UE asset snapshots from the bound editor. Read-only project evidence.',knowledgeSchema,async(a,e,s)=>bridge.knowledge(s,a,e.signal));
-  tool('unreal_knowledge_record','Save a sourced inference or reusable planning experience in the bound project cache under the configured approval policy. Use only for conclusions worth retaining.',knowledgeRecordSchema,async(a,e,s)=>{await approve(e,`保存项目知识：${a.tool}`);return bridge.knowledgeRecord(s,a,e.signal);},true);
+  tool('unreal_knowledge','Query project documents, source and published graph/snapshots. project_context may embed the query but never rebuilds document vectors; arguments {query,retrievalMode:"base"} forces zero-network retrieval. Inspect retrievalMode/degradedReasons/sourceStatus. read_chunk {chunkId,expectedHash} and read_document {documentId,expectedHash,offset,maxChunks} verify indexed sources. Explicit UE snapshot workflow: snapshot_export_start {requestId:UUID}, snapshot_export_status/cancel {jobId}, then snapshot_import {jobId}. Export/import write derived cache only, never save assets or rebuild graphs. read_asset_snapshot {assetPath,section?,graph?,offset?,limit?} and search_asset_snapshots {query?,offset?,limit?} use imported saved-package evidence offline; inspect snapshotGeneration/liveState/coverage. backend=editor requests live/legacy editor evidence; backend=local forces local reads. The current conversation binding determines the UE project; an optional projectHandle only validates that binding.',hostKnowledgeSchema,async(a,e)=>{await knowledge.resolver.bound(e.agent,{projectHandle:a.projectHandle,signal:e.signal});return knowledge.query(e.agent,a,e.signal);});
+  tool('unreal_knowledge_projects','Return the UE project bound to this conversation and its knowledge/cache paths. No separate project selection or indexing.',z.object({}).strict(),async(_a,e)=>{await knowledge.resolver.bound(e.agent,{signal:e.signal});return knowledge.projects(e.agent,e.signal);});
+  tool('unreal_knowledge_build','Explicitly start a background base-index build for the bound UE project. Documents come from ProjectKnowledge; derived files stay in its plugin Cache. Local documents and source graph only; zero Embedding requests. Reuse requestId to inspect the same task.',knowledgeBuildSchema.partial({projectHandle:true}),async(a,e)=>{const project=await knowledge.resolver.bound(e.agent,{projectHandle:a.projectHandle,signal:e.signal});return {job:await knowledge.build({...a,projectHandle:project.projectHandle},e.signal,e.agent)};},true);
+  tool('unreal_knowledge_status','Read published local index and background task status for the bound UE project.',knowledgeStatusSchema.partial({projectHandle:true}),async(a,e)=>{const project=await knowledge.resolver.bound(e.agent,{projectHandle:a.projectHandle,signal:e.signal});return knowledge.status({...a,projectHandle:project.projectHandle},e.signal);});
+  tool('unreal_knowledge_cancel','Cancel a base-index task; the previous published index stays available.',knowledgeCancelSchema.partial({projectHandle:true}),async(a,e)=>{const project=await knowledge.resolver.bound(e.agent,{projectHandle:a.projectHandle,signal:e.signal});return {job:await knowledge.cancel({...a,projectHandle:project.projectHandle},e.signal)};},true);
+  tool('unreal_knowledge_record','Save a sourced inference or reusable planning experience in the bound project cache under the configured approval policy. Use only for conclusions worth retaining.',knowledgeRecordSchema,async(a,e)=>{await approve(e,`保存项目知识：${a.tool}`);return knowledge.record(e.agent,a,e.signal);},true);
   tool('unreal_mcp_tools','List top-level UE 5.8 MCP tools and their input schemas for this editor.',z.object({}).strict(),async(_a,e,s)=>bridge.mcpTools(s,e.signal));
   tool('unreal_mcp_toolsets','List UE 5.8 MCP toolsets available in the bound editor. Use before describing a toolset.',z.object({}).strict(),async(_a,e,s)=>bridge.mcpToolsets(s,e.signal));
   tool('unreal_mcp_describe','Describe a UE 5.8 MCP toolset. Filter by function name; use includeSchema=false for a compact list, then obtain the exact matching schema before calling.',mcpDescribeSchema,async(a,e,s)=>bridge.mcpDescribe(s,a,e.signal));

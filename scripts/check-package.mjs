@@ -18,6 +18,8 @@ if (packed.error) throw packed.error;
 assert.equal(packed.status, 0, packed.stderr);
 const files = JSON.parse(packed.stdout)[0].files.map(file => file.path);
 const entries = [manifest.main, ...Object.values(manifest.exports), manifest.dsh.bundle.patch].map(path => path.replace(/^\.\//, ''));
+// Workers are loaded by URL at runtime and are not public package exports.
+entries.push('lib/knowledge-worker.js', 'lib/embedding-worker.js');
 for (const path of entries) assert.ok(files.includes(path), `Missing install entry: ${path}`);
 assert.ok(!files.some(path => /^(src|test|unreal|editors|node_modules)\/|\.map$/.test(path)), 'Development files leaked into the package');
 const patch = await readFile(new URL('../cordis.patch.yml', import.meta.url), 'utf8');

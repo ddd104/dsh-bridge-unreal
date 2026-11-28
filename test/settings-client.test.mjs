@@ -210,3 +210,14 @@ test('invalid drafts, read-only forms and absent host state cannot save; cache e
   await ui.update(snapshot({status:'unavailable'}));
   assert.match(text(ui.tree),/暂不可用/);
 });
+
+test('settings categories preserve unsaved values across tabs and save all edits in one revision',async t=>{
+  const calls=[],ui=await mount(t,snapshot(),async(...args)=>{calls.push(args);return true;});
+  const tabs=()=>ui.tree.root.findAllByProps({role:'tab'}),panels=()=>ui.tree.root.findAllByProps({role:'tabpanel'});
+  assert.equal(tabs()[0].props['aria-selected'],true);assert.deepEqual(panels().map(panel=>panel.props.hidden),[false,true,true]);
+  await ui.change('embeddingModel','text-embedding-v4');
+  await act(async()=>tabs()[1].props.onClick());await ui.change('guardMaxSteps',123);
+  await act(async()=>tabs()[2].props.onClick());assert.equal(calls.length,0);assert.deepEqual(panels().map(panel=>panel.props.hidden),[true,true,false]);
+  await act(async()=>tabs()[0].props.onClick());assert.equal(ui.tree.root.findByProps({name:'embeddingModel'}).props.value,'text-embedding-v4');
+  await ui.submit();assert.deepEqual(calls,[[[{op:'set',path:['embeddingModel'],value:'text-embedding-v4'},{op:'set',path:['guardMaxSteps'],value:123}],7]]);
+});

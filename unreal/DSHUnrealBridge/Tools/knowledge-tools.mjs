@@ -18,3 +18,7 @@ export const workerToolNames = Object.freeze([
 
 const workerTools = new Set(workerToolNames);
 export const isWorkerTool = name => workerTools.has(name);
+
+// Host-only tools are not sent to editors with the native v1 catalog.
+export const hostDocumentToolNames = Object.freeze(['read_document', 'read_chunk']);
+export const isHostDocumentTool = name => hostDocumentToolNames.includes(name);

@@ -1,0 +1,3 @@
+signal,period_ms,owner
+VehicleSpeedMarker,30,Telemetry
+DoorStateMarker,100,Body

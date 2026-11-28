@@ -21,7 +21,7 @@ manifest.files=['lib','cordis.patch.yml','LICENSE','THIRD_PARTY_NOTICES.md'];
 await writeFile(join(stage,'package.json'),JSON.stringify(manifest,null,2)+'\n');
 for(const name of ['cordis.patch.yml','LICENSE','THIRD_PARTY_NOTICES.md'])await copyFile(join(root,name),join(stage,name));
 const files=await readdir(join(stage,'lib'));
-if(files.length!==3||files.some(name=>!['index.js','client.js','remote.js'].includes(name)))throw new Error('Unexpected release build files');
+if(files.length!==5||files.some(name=>!['index.js','client.js','remote.js','knowledge-worker.js','embedding-worker.js'].includes(name)))throw new Error('Unexpected release build files');
 for(const name of files){
   const content=await readFile(join(stage,'lib',name),'utf8');
   if(/sourceMappingURL|sourcesContent/.test(content))throw new Error(`Source map data in ${name}`);

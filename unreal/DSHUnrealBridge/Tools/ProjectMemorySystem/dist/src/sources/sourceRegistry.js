@@ -35,27 +35,24 @@ export function createSourceProvider(id, label, extensions) {
     };
 }
 function decodeXml(value) {
-    return value
-        .replace(/&lt;/g, "<")
-        .replace(/&gt;/g, ">")
-        .replace(/&amp;/g, "&")
-        .replace(/&quot;/g, "\"")
-        .replace(/&apos;/g, "'");
-}
-function stripXmlTags(value) {
-    return decodeXml(value.replace(/<[^>]+>/g, " ")).replace(/[ \t]+/g, " ").trim();
+    const entities = { lt: "<", gt: ">", amp: "&", quot: '"', apos: "'" };
+    return value.replace(/&(lt|gt|amp|quot|apos|#x[0-9a-f]+|#[0-9]+);/gi, (_match, code) => code[0] === "#" ? String.fromCodePoint(code[1].toLowerCase() === "x" ? parseInt(code.slice(2), 16) : parseInt(code.slice(1), 10)) : entities[code]);
 }
 function inflateZipEntry(buffer, fileName, compressionMethod, dataStart, compressedSize) {
+    if (fileName !== "word/document.xml")
+        return undefined;
     const dataEnd = dataStart + compressedSize;
     if (dataStart < 0 || dataEnd > buffer.length)
         return undefined;
     const compressed = buffer.subarray(dataStart, dataEnd);
     if (compressionMethod === 0) {
+        if (compressedSize > 32 * 1024 * 1024)
+            throw new Error("DOCX document part exceeds 32 MiB.");
         return Buffer.from(compressed);
     }
     if (compressionMethod === 8) {
         try {
-            return zlib.inflateRawSync(compressed);
+            return zlib.inflateRawSync(compressed, { maxOutputLength: 32 * 1024 * 1024 });
         }
         catch (error) {
             const reason = error instanceof Error ? error.message : String(error);
@@ -124,76 +121,36 @@ function readZipEntriesFromLocalHeaders(buffer) {
 function readZipEntries(buffer) {
     return readZipEntriesFromCentralDirectory(buffer) ?? readZipEntriesFromLocalHeaders(buffer);
 }
-function docxToText(content) {
-    const entries = readZipEntries(content);
-    const documentXml = entries.get("word/document.xml");
+function parseDocx(content) {
+    const entries = readZipEntries(content), documentXml = entries.get("word/document.xml");
     if (!documentXml)
-        return "";
-    return documentXml
-        .toString("utf8")
-        .replace(/<\/w:p>/g, "\n")
-        .replace(/<w:tab\/>/g, "\t")
-        .replace(/<w:br\/>/g, "\n")
-        .replace(/<[^>]+>/g, " ")
-        .split(/\r?\n/)
-        .map((line) => decodeXml(line).replace(/[ \t]+/g, " ").trim())
-        .filter(Boolean)
-        .join("\n");
-}
-function xlsxSharedStrings(entries) {
-    const sharedStringsXml = entries.get("xl/sharedStrings.xml");
-    if (!sharedStringsXml)
-        return [];
-    const xml = sharedStringsXml.toString("utf8");
-    const strings = [];
-    const itemRegex = /<si\b[\s\S]*?<\/si>/g;
-    const textRegex = /<t\b[^>]*>([\s\S]*?)<\/t>/g;
-    for (const item of xml.match(itemRegex) ?? []) {
-        const parts = [];
-        let match;
-        while ((match = textRegex.exec(item)) !== null) {
-            parts.push(decodeXml(match[1]));
+        throw new Error("DOCX has no word/document.xml.");
+    const blocks = [], headingPath = [];
+    let paragraph = 0;
+    for (const match of documentXml.toString("utf8").matchAll(/<w:p\b[^>]*\/>|<w:p\b[^>]*>[\s\S]*?<\/w:p>/g)) {
+        paragraph++;
+        const xml = match[0];
+        const parts = [...xml.matchAll(/<w:t\b[^>]*>([\s\S]*?)<\/w:t>|<w:(tab|br|cr)\b[^>]*\/?>/g)].map(part => part[1] !== undefined ? decodeXml(part[1]) : part[2] === "tab" ? "\t" : "\n");
+        const text = parts.join("");
+        const style = /<w:pStyle\b[^>]*w:val=["']([^"']+)/.exec(xml)?.[1];
+        const outline = /<w:outlineLvl\b[^>]*w:val=["']([0-8])/.exec(xml)?.[1];
+        const heading = style ? /^(?:Heading|标题)\s*([1-9])$/i.exec(style) : null;
+        const level = heading ? Number(heading[1]) : outline !== undefined ? Number(outline) + 1 : 0;
+        if (!text.trim())
+            continue;
+        if (level) {
+            headingPath.length = level - 1;
+            headingPath[level - 1] = text;
         }
-        strings.push(parts.join(""));
+        blocks.push({ text, kind: level ? "heading" : "paragraph", headingPath: headingPath.filter(Boolean), location: { kind: "docx", part: "word/document.xml", startParagraph: paragraph, endParagraph: paragraph, textStart: 0, textEnd: text.length } });
     }
-    return strings;
-}
-function xlsxToText(content) {
-    const entries = readZipEntries(content);
-    const sharedStrings = xlsxSharedStrings(entries);
-    const sheetNames = [...entries.keys()]
-        .filter((name) => /^xl\/worksheets\/sheet\d+\.xml$/i.test(name))
-        .sort();
-    const rows = [];
-    for (const sheetName of sheetNames) {
-        const xml = entries.get(sheetName)?.toString("utf8") ?? "";
-        rows.push(`# ${sheetName}`);
-        const rowRegex = /<row\b[\s\S]*?<\/row>/g;
-        const cellRegex = /<c\b([^>]*)>([\s\S]*?)<\/c>/g;
-        const valueRegex = /<v>([\s\S]*?)<\/v>/;
-        for (const rowXml of xml.match(rowRegex) ?? []) {
-            const cells = [];
-            let cellMatch;
-            while ((cellMatch = cellRegex.exec(rowXml)) !== null) {
-                const attrs = cellMatch[1];
-                const body = cellMatch[2];
-                const rawValue = valueRegex.exec(body)?.[1] ?? stripXmlTags(body);
-                if (attrs.includes('t="s"')) {
-                    const index = Number.parseInt(rawValue, 10);
-                    cells.push(Number.isFinite(index) ? sharedStrings[index] ?? rawValue : rawValue);
-                }
-                else {
-                    cells.push(decodeXml(rawValue));
-                }
-            }
-            if (cells.some((cell) => cell.trim()))
-                rows.push(cells.join("\t"));
-        }
-    }
-    return rows.filter(Boolean).join("\n");
+    return { sourceType: "docx", text: blocks.map(block => block.text).join("\n"), metadata: { paragraphCount: paragraph }, blocks };
 }
 export function createDefaultSourceRegistry() {
     const registry = new SourceRegistry();
+    registry.register({ id: "pdf", label: "Text PDF", extensions: [".pdf"], phase: "docs-index",
+        describe: () => "PDF text with physical page citations; image-only pages need OCR.",
+        parse: async (filePath, content) => (await import("./pdfParser.js")).parsePdf(filePath, content) });
     registry.register({
         id: "proto",
         label: "Protocol Buffers schema",
@@ -210,7 +167,7 @@ export function createDefaultSourceRegistry() {
         describe: () => "Legacy Excel worksheets and cell values.",
         parse: async (_filePath, content) => {
             const parsed = parseXls(content);
-            return { sourceType: "xls", text: parsed.text, metadata: { sheetNames: parsed.sheetNames } };
+            return { sourceType: "xls", text: parsed.text, metadata: { sheetNames: parsed.sheetNames }, blocks: parsed.blocks };
         }
     });
     registry.register({
@@ -219,11 +176,7 @@ export function createDefaultSourceRegistry() {
         extensions: [".docx"],
         phase: "docs-index",
         describe: () => "Word document source provider.",
-        parse: async (_filePath, content) => ({
-            sourceType: "docx",
-            text: docxToText(content),
-            metadata: {}
-        })
+        parse: async (_filePath, content) => parseDocx(content)
     });
     registry.register({
         id: "xlsx",
@@ -231,11 +184,10 @@ export function createDefaultSourceRegistry() {
         extensions: [".xlsx"],
         phase: "docs-index",
         describe: () => "Excel workbook source provider.",
-        parse: async (_filePath, content) => ({
-            sourceType: "xlsx",
-            text: xlsxToText(content),
-            metadata: {}
-        })
+        parse: async (_filePath, content) => {
+            const parsed = parseXls(content);
+            return { sourceType: "xlsx", text: parsed.text, metadata: { sheetNames: parsed.sheetNames }, blocks: parsed.blocks };
+        }
     });
     return registry;
 }

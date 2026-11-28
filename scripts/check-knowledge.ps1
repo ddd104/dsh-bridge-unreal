@@ -8,14 +8,24 @@ $PluginRoot = (Resolve-Path -LiteralPath $PluginRoot).Path
 $required = @(
     'Runtime/Win64/node.exe',
     'Tools/knowledge-worker.mjs',
+    'Tools/knowledge-core.mjs',
     'Tools/knowledge-tools.mjs',
     'Tools/experience-store.mjs',
     'Tools/ProjectGraph/dist/src/commands/buildGraph.js',
     'Tools/ProjectMemorySystem/dist/src/commands/buildMemory.js',
     'Tools/ProjectMemorySystem/dist/src/sources/protoParser.js',
     'Tools/ProjectMemorySystem/dist/src/sources/xlsParser.js',
+    'Tools/ProjectMemorySystem/dist/src/sources/wikiParser.js',
+    'Tools/ProjectMemorySystem/dist/src/sources/pdfParser.js',
+    'Tools/ProjectMemorySystem/dist/src/commands/readDocument.js',
     'Config/Knowledge/ProjectMemory.project.json',
-    'ThirdParty/Node/LICENSE'
+    'ThirdParty/Node/LICENSE',
+    'ThirdParty/ProjectKnowledge/yaml.LICENSE',
+    'ThirdParty/ProjectKnowledge/pdfjs.LICENSE',
+    'ThirdParty/ProjectKnowledge/pdfjs-CMaps.LICENSE',
+    'ThirdParty/ProjectKnowledge/pdfjs-Foxit.LICENSE',
+    'ThirdParty/ProjectKnowledge/pdfjs-Liberation.LICENSE',
+    'ThirdParty/ProjectKnowledge/dommatrix.LICENSE'
 )
 $missing = @($required | Where-Object { -not (Test-Path -LiteralPath (Join-Path $PluginRoot $_) -PathType Leaf) })
 if ($missing.Count -gt 0) {

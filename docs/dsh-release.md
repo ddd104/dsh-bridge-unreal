@@ -33,4 +33,6 @@ npm run package:dsh
 dsh plugin --profile desktop add 'github:ddd104/dsh-bridge-unreal' --ignore-scripts
 ```
 
-发行包不含开发源码、测试、sourcemap 或 UE 插件。JS 构建产物仍可阅读，不是源码加密；第三方依赖保留各自许可证。许可文件随包交付。
+发行包包含五个 JS 文件：宿主、客户端、Remote、Knowledge Worker 和 Embedding Worker。两个 Worker 必须与宿主配套，知识文档解析器及 PDF 资源已打入 Knowledge Worker，无需从用户工程加载可执行模块。
+
+开发与宿主知识索引要求 Node.js `^22.23.5 || >=24.15.0`（含 SQLite FTS5）。发行包不含开发源码、测试、sourcemap 或 UE 插件。JS 构建产物仍可阅读，不是源码加密；第三方依赖保留各自许可证。许可文件随包交付。

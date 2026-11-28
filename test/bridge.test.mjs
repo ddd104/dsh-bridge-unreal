@@ -62,17 +62,17 @@ test('session cannot switch editor while a write is pending',async t=>{const b=a
 test('DSH tools require a session and actual approval before writing',async t=>{
   const stateDir=await mkdtemp(join(tmpdir(),'dsh-tools-'));const tools=new Map();const services=new Map();let approve=false;
   const ctx={tools:{register:d=>tools.set(d.name,d)},systemPrompt:{section(){}},typert:{register(){}},provide:(k,v)=>services.set(k,v),effect:f=>f(),get:k=>k==='approval'?{request:async()=>approve?'allowed-once':'rejected'}:undefined};
-  await apply(ctx,{stateDir,port:0});const b=services.get('unrealBridge').bridge;t.after(async()=>{await b.close();await rm(stateDir,{recursive:true,force:true});});let writes=0;await editor(b,'UE1',m=>{if(m.method==='apply_patch')writes++;return{valid:true,revision:'v2'};});b.bind('s','UE1');
+  await apply(ctx,{stateDir,port:0,requireApproval:true});const b=services.get('unrealBridge').bridge;t.after(async()=>{await b.close();await rm(stateDir,{recursive:true,force:true});});let writes=0;await editor(b,'UE1',m=>{if(m.method==='apply_patch')writes++;return{valid:true,revision:'v2'};});b.bind('s','UE1');
   const exec={agent:{session:{id:'s'}},name:'unreal_apply',callId:'call',signal:new AbortController().signal};const p=await b.preview('s','patch',patch());const args={previewId:p.previewId,requestId:randomUUID()};
   assert.equal((await tools.get('unreal_state').execute({},{})).error.code,'SESSION_REQUIRED');
   assert.equal((await tools.get('unreal_apply').execute(args,exec)).error.code,'PERMISSION_DENIED');assert.equal(writes,0);approve=true;assert.equal((await tools.get('unreal_apply').execute(args,exec)).ok,true);assert.equal(writes,1);
-  assert.equal(services.get('unrealBridge').typertRemote.service,services.get('unrealBridge'));assert.equal(tools.size,35);
+  assert.equal(services.get('unrealBridge').typertRemote.service,services.get('unrealBridge'));assert.equal(tools.size,39);
 });
 
-test('bridge writes use the configured approval policy',async t=>{
+test('bridge writes default to no additional approval request',async t=>{
   const stateDir=await mkdtemp(join(tmpdir(),'dsh-no-approval-'));const tools=new Map();const services=new Map();let approvalRequests=0;let writes=0;
   const ctx={tools:{register:d=>tools.set(d.name,d)},systemPrompt:{section(){}},typert:{register(){}},provide:(k,v)=>services.set(k,v),effect:f=>f(),get:k=>k==='approval'?{request:async()=>{approvalRequests++;return 'rejected';}}:undefined};
-  await apply(ctx,{stateDir,port:0,requireApproval:false});const b=services.get('unrealBridge').bridge;t.after(async()=>{await b.close();await rm(stateDir,{recursive:true,force:true});});
+  await apply(ctx,{stateDir,port:0});const b=services.get('unrealBridge').bridge;t.after(async()=>{await b.close();await rm(stateDir,{recursive:true,force:true});});
   await editor(b,'UE1',m=>{if(m.method==='apply_patch')writes++;return{valid:true,revision:'v2'};});b.bind('s','UE1');
   assert.equal(b.state('s').requireApproval,false);
   const exec={agent:{session:{id:'s'}},name:'unreal_apply',callId:'call',signal:new AbortController().signal};const p=await b.preview('s','patch',patch());

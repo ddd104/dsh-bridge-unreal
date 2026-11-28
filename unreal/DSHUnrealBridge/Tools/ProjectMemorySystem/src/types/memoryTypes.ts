@@ -74,6 +74,35 @@ export interface DocumentRecord {
   metadata: Record<string, unknown>;
   hash: string;
   modifiedAt: string;
+  schemaVersion?: 2;
+  parserVersion?: string;
+  chunkingFingerprint?: string;
+  sourceHash?: string;
+  chunks?: KnowledgeChunk[];
+}
+
+export type SourceLocation =
+  | { kind: "pdf"; page: number; pageLabel?: string; textStart: number; textEnd: number }
+  | { kind: "lines"; startLine: number; endLine: number; startOffset: number; endOffset: number }
+  | { kind: "docx"; part: "word/document.xml"; startParagraph: number; endParagraph: number; textStart: number; textEnd: number }
+  | { kind: "sheet"; sheet: string; startRow: number; endRow: number; startColumn: string; endColumn: string; range: string; headerRange?: string; headerText?: string; textStart?: number; textEnd?: number };
+
+export interface SourceBlock {
+  text: string;
+  headingPath: string[];
+  location: SourceLocation;
+  kind: "heading" | "paragraph" | "code" | "list" | "table";
+}
+
+export interface KnowledgeChunk {
+  chunkId: string;
+  documentId: string;
+  ordinal: number;
+  text: string;
+  headingPath: string[];
+  location: SourceLocation;
+  chunkHash: string;
+  parserVersion: string;
 }
 
 export interface MemorySearchResult {
@@ -83,6 +112,15 @@ export interface MemorySearchResult {
   score: number;
   excerpt: string;
   sourceType: string;
+  documentId?: string;
+  chunkId?: string;
+  sourceHash?: string;
+  chunkHash?: string;
+  parserVersion?: string;
+  headingPath?: string[];
+  location?: SourceLocation;
+  metadata?: Record<string, unknown>;
+  sourceStatus?: "current";
 }
 
 export type KeySymbolKind =

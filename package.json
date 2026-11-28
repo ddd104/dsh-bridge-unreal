@@ -40,7 +40,9 @@
     "build:dev": "node scripts/build.mjs --outdir .test-state/lib",
     "test": "node scripts/test.mjs",
     "check:package": "node scripts/check-package.mjs",
-    "check": "npm run build && npm test && npm run check:package"
+    "check": "npm run build && npm test && npm run check:package",
+    "test:knowledge-baseline": "node scripts/knowledge-baseline.mjs",
+    "test:knowledge-m4": "node scripts/knowledge-m4-evaluation.mjs"
   },
   "files": [
     "lib/*.js",
@@ -66,7 +68,7 @@
     "react-test-renderer": "18.3.1"
   },
   "engines": {
-    "node": ">=22"
+    "node": "^22.23.5 || >=24.15.0"
   },
   "license": "MIT"
 }

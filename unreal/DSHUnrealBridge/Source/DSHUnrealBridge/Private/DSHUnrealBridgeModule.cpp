@@ -275,7 +275,7 @@ private:
     void Hello()
     {
         bConnecting=false;Sequence=0;auto O=MakeShared<FJsonObject>();O->SetStringField(TEXT("type"),TEXT("hello"));O->SetNumberField(TEXT("protocol"),1);O->SetStringField(TEXT("editorId"),EditorId);O->SetStringField(TEXT("project"),FApp::GetProjectName());O->SetStringField(TEXT("projectPath"),FPaths::ConvertRelativePathToFull(FPaths::GetProjectFilePath()));O->SetStringField(TEXT("engineVersion"),FEngineVersion::Current().ToString());O->SetNumberField(TEXT("pid"),FPlatformProcess::GetCurrentProcessId());
-        TArray<TSharedPtr<FJsonValue>> Caps;for(const TCHAR* Name:{TEXT("selection"),TEXT("manual_asset_candidates"),TEXT("level_selection"),TEXT("blueprint_component_selection"),TEXT("runtime_inspection"),TEXT("read_blueprint"),TEXT("preview_patch"),TEXT("apply_patch"),TEXT("create_blueprint"),TEXT("undo"),TEXT("save"),TEXT("request_status"),TEXT("mcp_tools"),TEXT("mcp_target_validation"),TEXT("mcp_operation_context"),TEXT("safe_asset_presentation"),TEXT("project_knowledge"),TEXT("focus_asset"),TEXT("custom_event_patch"),TEXT("visual_capture"),TEXT("data_table_copy_property"),TEXT("data_table_patch"),TEXT("data_table_write_rows"),TEXT("data_table_manage_rows"),TEXT("data_table_patch_containers"),TEXT("automatic_graph_layout"),TEXT("level_blueprint_lookup"),TEXT("material_graph_patch")})Caps.Add(MakeShared<FJsonValueString>(Name));O->SetArrayField(TEXT("capabilities"),Caps);Send(O);
+        TArray<TSharedPtr<FJsonValue>> Caps;for(const TCHAR* Name:{TEXT("selection"),TEXT("manual_asset_candidates"),TEXT("level_selection"),TEXT("blueprint_component_selection"),TEXT("runtime_inspection"),TEXT("read_blueprint"),TEXT("preview_patch"),TEXT("apply_patch"),TEXT("create_blueprint"),TEXT("undo"),TEXT("save"),TEXT("request_status"),TEXT("mcp_tools"),TEXT("mcp_target_validation"),TEXT("mcp_operation_context"),TEXT("safe_asset_presentation"),TEXT("project_knowledge"),TEXT("ue_snapshot_export_v1"),TEXT("focus_asset"),TEXT("custom_event_patch"),TEXT("visual_capture"),TEXT("data_table_copy_property"),TEXT("data_table_patch"),TEXT("data_table_write_rows"),TEXT("data_table_manage_rows"),TEXT("data_table_patch_containers"),TEXT("automatic_graph_layout"),TEXT("level_blueprint_lookup"),TEXT("material_graph_patch")})Caps.Add(MakeShared<FJsonValueString>(Name));O->SetArrayField(TEXT("capabilities"),Caps);Send(O);
     }
     TSharedPtr<FJsonObject> Error(const FString& Id,const FString& Code,const FString& Message,const TSharedPtr<FJsonObject>& Details=nullptr)
     {
@@ -473,6 +473,8 @@ private:
         }
         if(Method==TEXT("knowledge_call"))
         {
+            // The authenticated connection owns producer identity; tool arguments cannot spoof it.
+            if(KnowledgeTool.StartsWith(TEXT("snapshot_export_"))) (*KnowledgeArguments)->SetStringField(TEXT("_editorId"),EditorId);
             const TWeakPtr<FDSHConnection> Weak=AsShared();
             const FGuid KnowledgeId=FProjectKnowledgeService::Execute(KnowledgeTool,*KnowledgeArguments,nullptr,
                 [Weak,Id,bWrite](bool bSuccess,TSharedPtr<FJsonObject> Result)

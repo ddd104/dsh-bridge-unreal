@@ -19,7 +19,7 @@ export interface MemoryManifestSource extends FileSignature {
 }
 
 export interface MemoryManifestCacheFile extends FileSignature {
-  kind: "documents_jsonl" | "fts_sqlite";
+  kind: "documents_jsonl" | "chunks_jsonl" | "fts_sqlite" | "document_warnings";
 }
 
 export interface MemoryManifestGraphFile extends FileSignature {
@@ -28,6 +28,9 @@ export interface MemoryManifestGraphFile extends FileSignature {
 
 export interface MemoryManifest {
   schemaVersion: 1;
+  documentIndexVersion?: number;
+  parserVersion?: string;
+  chunkingFingerprint?: string;
   projectId: string;
   generatedAt: string;
   projectConfigHash: string;

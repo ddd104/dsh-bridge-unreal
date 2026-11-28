@@ -1,9 +1,10 @@
-import React,{useEffect,useRef,useState,useSyncExternalStore} from 'react';
+import React,{useEffect,useMemo,useRef,useState,useSyncExternalStore} from 'react';
 import {TYPERT_REMOTE} from './remote.mjs';
 import {registerVisualToolviews} from './visual-client.mjs';
 import {registerSettingsClient} from './settings-client.mjs';
 import {ExecutionStatus} from './execution-client.mjs';
 import {CachePanel} from './cache-client.mjs';
+import {EmbeddingPanel} from './embedding-client.mjs';
 import {DockDisclosure} from './dock-disclosure.mjs';
 
 const h=React.createElement;
@@ -28,6 +29,10 @@ const snapshotStatus=snapshot=>snapshot.status==='disconnected'?'编辑器已离
 const captureTime=value=>{const date=new Date(value);return Number.isNaN(date.getTime())?String(value):date.toLocaleString('zh-CN',{hour12:false});};
 
 export const inject=['slots','sessions','remote'];
+export function mainSessionId(snapshot){
+  const visible=Object.values(snapshot?.byId??{}).filter(session=>(session.retainedBy?.mainView??0)>0);
+  return visible.length===1?visible[0].id:null;
+}
 
 export function UnrealDock({read,bind,editAssetCandidates}) {
   const [state,setState]=useState(null);
@@ -168,19 +173,45 @@ export async function apply(ctx) {
     const access=useSyncExternalStore(subscribeCache,cacheSnapshot,cacheSnapshot);
     return access?h(CachePanel,access):h('p',{role:'status',style:{color:colors.muted}},'缓存服务连接后可查看占用和执行清理。');
   };
+  const SettingsKnowledge=props=>{
+    const access=useSyncExternalStore(subscribeCache,cacheSnapshot,cacheSnapshot);
+    const sessionId=useSyncExternalStore(listener=>ctx.sessions?.list?.subscribe(listener)??(()=>{}),()=>mainSessionId(ctx.sessions?.list?.getSnapshot()),()=>null);
+    const boundAccess=useMemo(()=>access?.embedding.forSession(sessionId),[access,sessionId]);
+    return boundAccess?h(EmbeddingPanel,{key:sessionId??'unbound',access:boundAccess,...props}):h('p',{role:'status'},'知识服务连接后可保存 API Key、测试连接和管理索引。');
+  };
   // Settings belong to the global shell and must remain discoverable without
   // an editor connection or the optional bridge Remote namespace.
-  registerSettingsClient(ctx,{renderCache:SettingsCache});
+  registerSettingsClient(ctx,{renderCache:SettingsCache,renderKnowledge:SettingsKnowledge});
   await ctx.remote.$mount(TYPERT_REMOTE);
   registerVisualToolviews(ctx);
   ctx.inject(['remote.unrealBridge'],child=>{
-    const unwrap=async promise=>{const result=await promise;if(!result.ok)throw new Error(result.error.message);return result.value;};
+    const remoteError=error=>Object.assign(new Error(error.message),{code:error.code,details:error.details});
+    const unwrap=async promise=>{const result=await promise;if(!result.ok)throw remoteError(result.error);return result.value;};
     const readCache=()=>unwrap(child.remote.unrealBridge.cacheStatus());
     const cleanupCache=options=>unwrap(child.remote.unrealBridge.cacheCleanup(options));
-    const access={read:readCache,cleanup:cleanupCache};
+    const call=(method,options)=>unwrap(child.remote.unrealBridge[method](options));
+    const using=(sessionId,call)=>child.sessions.using(sessionId,{source:'unrealBridge'},async reference=>{const state=reference.binding.session.getSnapshot();if(state.openState!=='open')throw state.openError??new Error('对话尚未就绪');const result=await call();if(!result.ok)throw remoteError(result.error);return result.value;});
+    const access={read:readCache,cleanup:cleanupCache,embedding:{
+      forSession:sessionId=>({
+        context:async()=>sessionId?using(sessionId,()=>child.remote.unrealBridge.knowledgeContext(sessionId)):
+          {project:null,reason:'请先打开对话，并在 Unreal Editor 面板绑定 UE 项目。',embedding:await call('embeddingStatus',{})},
+        setCredential:options=>call('embeddingSetCredential',options),removeCredential:options=>call('embeddingRemoveCredential',options),test:options=>call('embeddingTest',options),
+        ...Object.fromEntries(['build','cancel','resume','baseBuild','baseCancel'].map(action=>[action,options=>{
+          if(!sessionId)throw new Error('请先打开绑定 UE 的对话。');
+          return using(sessionId,()=>child.remote.unrealBridge.knowledgeAction(sessionId,{...options,action}));
+        }])),
+      }),
+    }};
     publishCache(access);
     child.effect?.(()=>()=>{if(cacheAccess===access)publishCache(null);});
-    const using=(sessionId,call)=>child.sessions.using(sessionId,{source:'unrealBridge'},async reference=>{const state=reference.binding.session.getSnapshot();if(state.openState!=='open')throw state.openError??new Error('对话尚未就绪');const result=await call();if(!result.ok)throw new Error(result.error.message);return result.value;});
-    child.slots.inject('conversation.input.dock',()=>child.slots.register({name:'conversation.input.dock',id:'unreal-bridge',order:20,inject:sessionId=>({read:()=>using(sessionId,()=>child.remote.unrealBridge.state(sessionId)),bind:editorId=>using(sessionId,()=>child.remote.unrealBridge.bind(sessionId,editorId)),editAssetCandidates:options=>using(sessionId,()=>child.remote.unrealBridge.editAssetCandidates(sessionId,options))})},UnrealDock));
+    child.slots.inject('conversation.input.dock',()=>child.slots.register({name:'conversation.input.dock',id:'unreal-bridge',order:20,inject:sessionId=>{
+      let lastDiscovery=0;
+      return {read:()=>using(sessionId,async()=>{
+        if(Date.now()-lastDiscovery>=30000&&typeof child.remote.unrealBridge.knowledgeWorkspaceProjects==='function'){
+          lastDiscovery=Date.now();await child.remote.unrealBridge.knowledgeWorkspaceProjects(sessionId).catch(()=>{});
+        }
+        return child.remote.unrealBridge.state(sessionId);
+      }),bind:editorId=>using(sessionId,()=>child.remote.unrealBridge.bind(sessionId,editorId)),editAssetCandidates:options=>using(sessionId,()=>child.remote.unrealBridge.editAssetCandidates(sessionId,options))};
+    }},UnrealDock));
   });
 }

@@ -98,6 +98,7 @@ export async function buildMemory(options: BuildMemoryOptions = {}): Promise<Com
       memoryOutputRoot: loaded.config.memoryOutputRoot,
       knowledgeRoots: loaded.config.knowledgeRoots,
       documentsIndexed: indexResult.documentsIndexed,
+      chunksIndexed: indexResult.chunksIndexed,
       changedSources: indexResult.changedSources.length,
       unchangedSources: indexResult.unchangedSources.length,
       removedSources: indexResult.removedSources.length,

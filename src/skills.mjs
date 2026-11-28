@@ -1,8 +1,8 @@
-import {dirname,isAbsolute,join,normalize,resolve} from 'node:path';
+import {join} from 'node:path';
+import {nearestProject} from './project-context.mjs';
 import {FileSystemSkillProvider} from '@deepseek-ai/dsh-skill-filesystem';
 
 const NAME='unreal-bridge-project',RANK=350,MAX_PROJECTS=32;
-const absent=error=>['ENOENT','ENOTDIR','FS_NOT_FOUND','FS_NOT_DIRECTORY'].includes(error?.code);
 
 /** Register workspace-local UE plugin skills; the caller owns the returned async disposer. */
 export function registerProjectSkills(ctx) {
@@ -25,40 +25,17 @@ export function registerProjectSkills(ctx) {
   let control,disposed=false,disposal,removeObservation,unregister,reportedMapping=false;
   const check=signal=>{signal?.throwIfAborted();control?.signal.throwIfAborted();};
 
-  async function probe(path,signal){
+  async function locate({cwd,signal}){
     check(signal);
     try{
-      const target=await fs.resolve(path,{signal});check(signal);
-      const info=await fs.stat(target,signal);check(signal);
-      return {target,info};
-    }catch(error){check(signal);if(absent(error))return undefined;throw error;}
-  }
-
-  async function locate(options){
-    const {cwd,signal}=options;check(signal);
-    if(typeof cwd!=='string'||!cwd.trim())return undefined;
-    const initial=await probe(cwd,signal);
-    if(initial?.info?.type!=='directory')return undefined;
-    const path=initial.target.displayPath;
-    if(typeof path!=='string'||!isAbsolute(path)||normalize(fs.processPathFromHostPath(path)??'')!==normalize(path)){
-      if(!reportedMapping){warn('Project skills are unavailable in this workspace: its filesystem does not map to the local host.');reportedMapping=true;}
+      const project=await nearestProject(fs,cwd,signal);check(signal);
+      if(!project)return undefined;
+      return {key:project.target.targetKey,path:project.path,skillsPath:join(project.path,'Plugins','DSHUnrealBridge','Skills')};
+    }catch(error){
+      check(signal);
+      if(error.code!=='PROJECT_LOCAL_UNAVAILABLE')throw error;
+      if(!reportedMapping){warn(error.message);reportedMapping=true;}
       return undefined;
-    }
-    let current=resolve(path);
-    while(true){
-      check(signal);
-      const directory=await probe(current,signal);
-      if(directory?.info?.type!=='directory')return undefined;
-      let entries;
-      try{entries=await fs.listDir(directory.target,signal);}
-      catch(error){check(signal);if(absent(error))return undefined;throw error;}
-      check(signal);
-      if(entries.some(entry=>entry.type==='file'&&entry.name.toLowerCase().endsWith('.uproject'))){
-        const pluginRoot=join(current,'Plugins','DSHUnrealBridge');
-        // A nearer UE project is a boundary even if it has no bridge plugin.
-        return {key:directory.target.targetKey,path:current,skillsPath:join(pluginRoot,'Skills')};
-      }
-      const parent=dirname(current);if(parent===current)return undefined;current=parent;
     }
   }
 

@@ -57,6 +57,25 @@ export async function loadProjectConfig(options = {}) {
             config.project.uproject = uproject ?? "";
         }
     }
+    if (options.hostPaths) {
+        const host = options.hostPaths;
+        config.projectId = host.projectId;
+        config.memoryOutputRoot = path.resolve(host.memoryRoot);
+        config.graph = {
+            ...config.graph, mode: "sqlite",
+            sqlitePath: path.join(host.graphRoot, "project_graph.sqlite"),
+            sqlite: {
+                databasePath: path.join(host.graphRoot, "project_graph.sqlite"),
+                nodesPath: path.join(host.graphRoot, "nodes.jsonl"),
+                edgesPath: path.join(host.graphRoot, "edges.jsonl")
+            }
+        };
+        Object.assign(config.graph, { ueCacheRoots: {
+                blueprints: path.join(host.ueCacheRoot, "blueprint_ir"),
+                assets: path.join(host.ueCacheRoot, "asset_registry"),
+                materials: path.join(host.ueCacheRoot, "material_ir")
+            } });
+    }
     return {
         config,
         configPath,

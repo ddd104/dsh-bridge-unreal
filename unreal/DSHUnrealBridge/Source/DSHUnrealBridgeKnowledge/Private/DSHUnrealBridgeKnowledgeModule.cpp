@@ -1,5 +1,6 @@
 #include "DSHUnrealBridgeKnowledgeModule.h"
 #include "ProjectKnowledgeService.h"
+#include "ProjectSnapshotPublication.h"
 
 #include "Async/Async.h"
 #include "AssetRegistry/AssetData.h"
@@ -70,10 +71,29 @@ struct FProjectKnowledgeUpdate
     FGuid WorkerRequest;
     TWeakPtr<SNotificationItem> Notification;
     TFuture<void> ExportFuture;
+    TSharedPtr<ProjectSnapshotPublication::FGeneration> Publication;
+    FString RequestId;
 };
 
 namespace
 {
+    TSharedPtr<FJsonObject> SnapshotJobJson(const FProjectKnowledgeUpdate& Job)
+    {
+        auto Result = MakeShared<FJsonObject>(); Result->SetStringField(TEXT("jobId"), Job.RequestId);
+        Result->SetStringField(TEXT("editorId"), Job.Publication->EditorId); Result->SetStringField(TEXT("projectFile"), Job.Publication->ProjectFile);
+        Result->SetStringField(TEXT("generation"), Job.Publication->Id);
+        Result->SetStringField(TEXT("status"), Job.Cancelled.load() ? TEXT("cancelled") : Job.bFinished ? (Job.bSucceeded ? TEXT("succeeded") : TEXT("failed")) : TEXT("running"));
+        Result->SetStringField(TEXT("phase"), Job.bFinished ? TEXT("complete") : Job.bFinalizing ? TEXT("publishing") : Job.bRegistryReady ? TEXT("capturing") : TEXT("scanning"));
+        Result->SetNumberField(TEXT("completedAssets"), Job.NextAsset); Result->SetNumberField(TEXT("totalAssets"), Job.Assets.Num());
+        Result->SetStringField(TEXT("message"), Job.CompletionError.Left(512));
+        Result->SetNumberField(TEXT("publishedAssets"), Job.bSucceeded ? Job.Publication->Assets.Num() : 0);
+        Result->SetStringField(TEXT("snapshotRoot"), ProjectSnapshotPublication::Root());
+        Result->SetBoolField(TEXT("buildsGraph"), false); return Result;
+    }
+    void SaveSnapshotJob(const FProjectKnowledgeUpdate& Job)
+    {
+        if (Job.Publication) ProjectSnapshotPublication::WriteJson(FPaths::Combine(ProjectSnapshotPublication::Root(), TEXT("jobs"), Job.RequestId + TEXT(".json")), SnapshotJobJson(Job));
+    }
     constexpr const TCHAR* BlueprintCacheDirName = TEXT("UE/blueprint_ir");
     constexpr const TCHAR* AssetRegistryCacheDirName = TEXT("UE/asset_registry");
     constexpr const TCHAR* MaterialCacheDirName = TEXT("UE/material_ir");
@@ -1047,6 +1067,7 @@ void FDSHUnrealBridgeKnowledgeModule::ShutdownModule()
     CancelKnowledgeUpdate();
     if (KnowledgeUpdate.IsValid() && KnowledgeUpdate->ExportFuture.IsValid()) KnowledgeUpdate->ExportFuture.Wait();
     KnowledgeUpdate.Reset();
+    SnapshotJobs.Reset();
     FProjectKnowledgeService::Shutdown();
     UnregisterConsoleCommands();
 #endif
@@ -1077,10 +1098,44 @@ void FDSHUnrealBridgeKnowledgeModule::RegisterMenus()
         LOCTEXT("KnowledgeToolbarTip", "全量扫描当前项目，为每个资产生成 JSON 快照并更新图谱与知识记忆。")));
 }
 
-void FDSHUnrealBridgeKnowledgeModule::StartKnowledgeUpdate()
+TSharedPtr<FJsonObject> FDSHUnrealBridgeKnowledgeModule::ExecuteSnapshotExport(const FString& Tool, const TSharedPtr<FJsonObject>& Args)
+{
+    check(IsInGameThread());
+    auto& Module = FModuleManager::GetModuleChecked<FDSHUnrealBridgeKnowledgeModule>(TEXT("DSHUnrealBridgeKnowledge"));
+    auto Fail = [](const FString& Text) { auto Result = MakeShared<FJsonObject>(); Result->SetStringField(TEXT("error"), Text); return Result; };
+    FString EditorId, Id; Args->TryGetStringField(TEXT("_editorId"), EditorId);
+    if (EditorId.IsEmpty() || EditorId.Len() > 128 || EditorId.Contains(TEXT("/")) || EditorId.Contains(TEXT("\\")) || EditorId.Contains(TEXT("..")) || EditorId.Contains(TEXT(":"))) return Fail(TEXT("Verified editor identity is required."));
+    Args->TryGetStringField(Tool == TEXT("snapshot_export_start") ? TEXT("requestId") : TEXT("jobId"), Id);
+    FGuid Guid; if (!FGuid::ParseExact(Id, EGuidFormats::DigitsWithHyphens, Guid)) return Fail(TEXT("A UUID requestId/jobId is required."));
+    Id = Guid.ToString(EGuidFormats::DigitsWithHyphensLower);
+    if (const auto* Task = Module.SnapshotJobs.Find(Id))
+    {
+        if ((*Task)->Publication->EditorId != EditorId) return Fail(TEXT("Snapshot task belongs to another editor instance."));
+        if (Tool == TEXT("snapshot_export_cancel") && Module.KnowledgeUpdate == *Task) Module.CancelKnowledgeUpdate();
+        return SnapshotJobJson(**Task);
+    }
+    const auto Previous = ProjectSnapshotPublication::ReadJson(FPaths::Combine(ProjectSnapshotPublication::Root(), TEXT("jobs"), Id + TEXT(".json")));
+    if (Previous.IsValid())
+    {
+        if (Previous->GetStringField(TEXT("editorId")) != EditorId || Previous->GetStringField(TEXT("projectFile")) != FPaths::ConvertRelativePathToFull(FPaths::GetProjectFilePath())) return Fail(TEXT("Snapshot task belongs to another project/editor."));
+        if (Previous->GetStringField(TEXT("status")) == TEXT("running")) { Previous->SetStringField(TEXT("status"), TEXT("interrupted")); Previous->SetStringField(TEXT("message"), TEXT("Exporter restarted; start a new explicit task.")); }
+        return Previous;
+    }
+    if (Tool != TEXT("snapshot_export_start")) return Fail(TEXT("Snapshot task not found."));
+    if (Module.KnowledgeUpdate.IsValid()) return Fail(TEXT("Another snapshot or legacy graph update is running."));
+    if (Module.SnapshotJobs.Num() >= 64) Module.SnapshotJobs.Reset();
+    Module.StartKnowledgeUpdate(true, Id, EditorId); return SnapshotJobJson(*Module.KnowledgeUpdate);
+}
+
+void FDSHUnrealBridgeKnowledgeModule::StartKnowledgeUpdate(bool bSnapshotOnly, const FString& RequestId, const FString& EditorId)
 {
     if (KnowledgeUpdate.IsValid()) return;
     KnowledgeUpdate = MakeShared<FProjectKnowledgeUpdate, ESPMode::ThreadSafe>();
+    if (bSnapshotOnly)
+    {
+        KnowledgeUpdate->Publication = ProjectSnapshotPublication::Begin(EditorId);
+        KnowledgeUpdate->RequestId = RequestId; SnapshotJobs.Add(RequestId, KnowledgeUpdate); SaveSnapshotJob(*KnowledgeUpdate);
+    }
     FProjectKnowledgeService::BeginAssetSnapshotScan();
     // 主动启动完整登记表扫描，不能只依赖编辑器此前浏览过的目录。
     AssetRegistry().SearchAllAssets(false);
@@ -1102,6 +1157,7 @@ void FDSHUnrealBridgeKnowledgeModule::CancelKnowledgeUpdate()
     KnowledgeUpdate->Cancelled.store(true);
     KnowledgeUpdate->bFinished = true;
     KnowledgeUpdate->CompletionError = TEXT("cancelled");
+    SaveSnapshotJob(*KnowledgeUpdate);
     FString SnapshotError;
     FProjectKnowledgeService::EndAssetSnapshotScan(KnowledgeUpdate->AssetPaths, KnowledgeUpdate->SnapshotErrors, false, SnapshotError);
     if (KnowledgeTicker.IsValid()) FTSTicker::GetCoreTicker().RemoveTicker(KnowledgeTicker);
@@ -1172,6 +1228,11 @@ bool FDSHUnrealBridgeKnowledgeModule::TickKnowledgeUpdate(float DeltaTime)
             Summary->SetStringField(TEXT("packageTimestamp"), IFileManager::Get().GetTimeStamp(*PackageFile).ToIso8601());
             Summary->SetNumberField(TEXT("packageSize"), IFileManager::Get().FileSize(*PackageFile));
         }
+        if (Update->Publication && AssetSnapshot.IsValid())
+        {
+            FString StageError;
+            if (!ProjectSnapshotPublication::Capture(*Update->Publication, AssetSnapshot, Summary, StageError)) Update->SnapshotErrors.Add(StageError);
+        }
         if (Update->bRechecking)
         {
             const int32 OriginalIndex = Update->Assets.IndexOfByPredicate([&Asset](const FAssetData& Item) { return Item.GetObjectPathString() == Asset.GetObjectPathString(); });
@@ -1206,6 +1267,37 @@ bool FDSHUnrealBridgeKnowledgeModule::TickKnowledgeUpdate(float DeltaTime)
     FString IndexError;
     if (!FProjectKnowledgeService::EndAssetSnapshotScan(Update->AssetPaths, Update->SnapshotErrors, true, IndexError, Update->DiskCoverage)) Update->SnapshotErrors.Add(IndexError);
     KnowledgeTicker.Reset();
+    if (Update->Publication)
+    {
+        SaveSnapshotJob(*Update);
+        const TWeakPtr<FProjectKnowledgeUpdate, ESPMode::ThreadSafe> WeakExport = Update;
+        Update->ExportFuture = Async(EAsyncExecution::Thread, [this, WeakExport]
+        {
+            const auto Task = WeakExport.Pin(); if (!Task) return;
+            FString Error; TSharedPtr<FJsonObject> Manifest;
+            if (!Task->SnapshotErrors.IsEmpty()) Error = Task->SnapshotErrors[0];
+            else if (!Task->Cancelled.load()) Manifest = ProjectSnapshotPublication::Seal(*Task->Publication, Task->DiskCoverage, Error, &Task->Cancelled);
+            AsyncTask(ENamedThreads::GameThread, [this, WeakExport, Manifest, Error]() mutable
+            {
+                const auto Task = WeakExport.Pin(); if (!Task) return;
+                if (!Task->Cancelled.load() && Manifest.IsValid())
+                {
+                    for (const FString& Stale : FProjectKnowledgeService::GetStaleAssetSnapshotPaths())
+                        if (Task->Publication->Assets.Contains(Stale)) { Error = TEXT("Asset changed before snapshot publication."); break; }
+                    if (Error.IsEmpty()) Task->bSucceeded = ProjectSnapshotPublication::Publish(*Task->Publication, Error);
+                }
+                Task->bFinished = true; if (!Task->Cancelled.load()) Task->CompletionError = Error;
+                SaveSnapshotJob(*Task);
+                if (const auto Notification = Task->Notification.Pin())
+                {
+                    Notification->SetText(Task->bSucceeded ? LOCTEXT("SnapshotsPublished", "UE 资产快照已发布；可在 DSH 接入，未重建图谱") : FText::FromString(TEXT("快照导出停止：") + Task->CompletionError));
+                    Notification->SetCompletionState(Task->bSucceeded ? SNotificationItem::CS_Success : SNotificationItem::CS_Fail); Notification->ExpireAndFadeout();
+                }
+                if (KnowledgeUpdate == Task) KnowledgeUpdate.Reset();
+            });
+        });
+        return false;
+    }
     TSharedPtr<FJsonObject> Snapshot = MakeOk();
     Snapshot->SetStringField(TEXT("projectRoot"), FPaths::ConvertRelativePathToFull(FPaths::ProjectDir()));
     Snapshot->SetNumberField(TEXT("assetCount"), Update->Summaries.Num());

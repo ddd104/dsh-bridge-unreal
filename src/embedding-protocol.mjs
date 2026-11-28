@@ -1,0 +1,11 @@
+import {z} from 'zod';
+import {projectHandleSchema} from './knowledge-protocol.mjs';
+const fingerprint=z.string().regex(/^[a-f0-9]{64}$/);
+const requestId=z.string().uuid();
+export const embeddingStatusSchema=z.object({projectHandle:projectHandleSchema.optional(),jobId:requestId.optional()}).strict();
+export const embeddingTestSchema=z.object({requestId,configFingerprint:fingerprint}).strict();
+export const embeddingCredentialSchema=z.object({configFingerprint:fingerprint,apiKey:z.string().min(1).max(4096)}).strict();
+export const embeddingRemoveCredentialSchema=z.object({configFingerprint:fingerprint}).strict();
+export const embeddingBuildSchema=z.object({projectHandle:projectHandleSchema,requestId,configFingerprint:fingerprint,mode:z.enum(['update','rebuild']).default('update'),roots:z.array(z.string().min(1).max(1024)).min(1).max(32)}).strict();
+export const embeddingCancelSchema=z.object({projectHandle:projectHandleSchema,jobId:requestId}).strict();
+export const embeddingResumeSchema=z.object({projectHandle:projectHandleSchema,jobId:requestId,requestId,configFingerprint:fingerprint}).strict();

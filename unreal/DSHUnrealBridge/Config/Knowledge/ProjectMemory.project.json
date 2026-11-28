@@ -13,13 +13,7 @@
     "allConfiguredPathsAreRelativeTo": "projectRoot"
   },
   "knowledgeRoots": [
-    "ProjectKnowledge",
-    "ProjectDocumentation",
-    "Docs",
-    "DesignDocs",
-    "TechnicalDesign",
-    "GameDesign",
-    "Tables"
+    "ProjectKnowledge"
   ],
   "memoryOutputRoot": "Plugins/DSHUnrealBridge/Cache/Memory",
   "sourcePolicy": {
@@ -36,7 +30,8 @@
       ".ini",
       ".xls",
       ".xlsx",
-      ".docx"
+      ".docx",
+      ".pdf"
     ],
     "includePatterns": [
       "**/*"
